@@ -5,6 +5,10 @@ src/configurations/__init__.py
 src/configurations/data_config.py
 src/configurations/plot_config.py
 src/sam/__init__.py
+src/sam/activations.py
+src/sam/models.py
+src/sam/optimizers.py
+src/sam/utils.py
 src/sam.egg-info/PKG-INFO
 src/sam.egg-info/SOURCES.txt
 src/sam.egg-info/dependency_links.txt

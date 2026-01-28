@@ -28,13 +28,17 @@ def init_teacher_student(d : int=10, teacher_act = 'He3', student_act = 'relu', 
     student = SingleIndex(d,student_act).to(device)
 
     with torch.no_grad():
-        teacher.W.weight.normal_(0, 1)
-        student.W.weight.normal_(0, 1)
+        teacher.W.weight.normal_(0, 1/ math.sqrt(d))
+        student.W.weight.normal_(0, 1/ math.sqrt(d))
+        # Normalize both teacher and student weights
+        teacher.W.weight /= torch.norm(teacher.W.weight)
+        student.W.weight /= torch.norm(student.W.weight)
 
     for p in teacher.parameters():
         p.requires_grad_(False)
 
-    # w_teacher = teacher.W.weight.data.clone().to(device)
+    # Normalize teacher weights
     w_teacher = torch.cat([p.view(-1) for p in teacher.parameters()])
+
 
     return teacher, student, w_teacher

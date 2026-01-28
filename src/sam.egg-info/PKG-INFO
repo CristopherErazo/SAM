@@ -3,7 +3,6 @@ Name: sam
 Version: 0.0.1
 Summary: Code for Sharpness-Aware Minimization
 Author-email: Cristopher Erazo <cerazova@sissa.it>
-Requires-Dist: numpy
 Requires-Dist: matplotlib
 Requires-Dist: pytest
 Provides-Extra: test

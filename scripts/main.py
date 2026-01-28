@@ -16,18 +16,22 @@ def main():
     parser.add_argument('--d', type=int, default=200, help='Input dimension')
     parser.add_argument('--tch_act', type=str, default='tanh', help='Activation function for teacher')
     parser.add_argument('--std_act', type=str, default='tanh', help='Activation function for student')
-    parser.add_argument('--n_train', type=int, default=1000, help='Number of training samples')
     parser.add_argument('--n_test', type=int, default=1000, help='Number of test samples')
     parser.add_argument('--bs', type=int, default=100, help='Batch size for training')
     parser.add_argument('--opt', type=str, default='SGD', help='Type of optimizer: SGD, adam, or SAM')
     parser.add_argument('--lr', type=float, default=0.1, help='Learning rate')
+    parser.add_argument('--gamma', type=float, default=0.0, help='Weight decay for SGD')
     parser.add_argument('--eps', type=float, default=0.0, help='Noise level for labels')
     parser.add_argument('--q', type=float, default=2.0, help='q-norm for SAM')
     parser.add_argument('--rho', type=float, default=0.1, help='Radius for SAM')
     parser.add_argument('--nprints', type=int, default=20, help='Number of prints during training')
+    parser.add_argument('--n_steps', type=int, default=1000, help='Number of training steps - each step is a batch')
 
     args = parser.parse_args()
     config = vars(args)
+
+    print("Configuration:")
+    print(config)
 
     # Extract config parameters
     bs = config['bs']
@@ -43,9 +47,9 @@ def main():
                                                        config['tch_act'],
                                                        config['std_act'],
                                                        device)
-    
+    norm_teacher = torch.norm(w_teacher)
     if config['opt'] == 'SGD':
-        optimizer = torch.optim.SGD(student.parameters(), lr=config['lr'])
+        optimizer = torch.optim.SGD(student.parameters(), lr=config['lr'],weight_decay=config['gamma'])
         closure = None
     elif config['opt'] == 'adam':
         optimizer = torch.optim.Adam(student.parameters(), lr=config['lr'])
@@ -61,31 +65,34 @@ def main():
                                                 
 
     # Generate datasets for test and train
-    x_train, y_train = generate_dataset(teacher, config['n_train'], config['d'], config['eps'], device)
     x_test, y_test = generate_dataset(teacher, config['n_test'], config['d'], config['eps'], device)
 
     # Dictionary to save training info
-    n_steps = config['n_train'] // bs
+    n_steps = config['n_steps']
     print_every = max(1, n_steps // config['nprints'])
+
     summary = {
         'step': [],
         'train_loss': [],
         'test_loss': [],
         'overlap': [], 
-        'norm_student': []
+        'norm_student': [],
+        'difference': []
     }
 
 
     
     for step in range(n_steps): # each step sample a batch from training set 
-        idx = step * bs
-        x = x_train[idx:idx+bs]
-        y = y_train[idx:idx+bs]
+        x , y = generate_dataset(teacher,bs, config['d'], config['eps'], device)
         y_pred = student(x)
         loss = F.mse_loss(y, y_pred)
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step(closure);
+        if closure is None:
+            loss.backward()
+            optimizer.step()
+        else:
+            optimizer.step(closure)
+        
  
         print_condition = (step % print_every == 0) or (step == n_steps - 1)
         if print_condition:
@@ -95,14 +102,17 @@ def main():
                 test_loss = F.mse_loss(y_test, y_test_pred)
                 # Compute overlap and norm
                 w_student = torch.cat([p.view(-1) for p in student.parameters()])
-                overlap = torch.dot(w_teacher, w_student) / (torch.norm(w_teacher) * torch.norm(w_student))
                 norm_student = torch.norm(w_student)
+                overlap = torch.dot(w_teacher, w_student) / (norm_teacher * norm_student)
+                difference = torch.norm(w_teacher - w_student)
+                
             # Save to summary
             summary['step'].append(step)
             summary['train_loss'].append(loss.item())
             summary['test_loss'].append(test_loss.item())
             summary['overlap'].append(overlap.item())
             summary['norm_student'].append(norm_student.item())
+            summary['difference'].append(difference.item())
             print(f'Step {step+1}/{n_steps}, Train Loss: {loss.item():.4f}, Test Loss: {test_loss.item():.4f}, Overlap: {overlap.item():.4f}, Norm Student: {norm_student.item():.4f}')
 
 
@@ -112,8 +122,8 @@ def main():
 
     # Save data
     
-    fix_params = { key : config[key] for key in ['d','tch_act','std_act','n_train','n_test']}
-    variable_params = { key : config[key] for key in ['bs','opt','lr','q','rho']}
+    fix_params = { key : config[key] for key in ['d','tch_act','std_act','n_test']}
+    variable_params = { key : config[key] for key in ['bs','opt','lr','q','rho','gamma']}
 
     params = {'fixed' : fix_params,
               'variable': variable_params}

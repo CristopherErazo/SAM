@@ -5,7 +5,7 @@ class SAM_Optimizer(Optimizer):
     """
     Two-gradient optimizer with internal q-norm perturbation:
       1) v = ∇L(p)
-      2) u = rho * sign(v) * |v|^(q-1) / (||v||_q + eps)
+    2) u = rho * sign(v) * |v|^(q-1) / (||v||_q^(q-1) + eps)
       3) g = ∇L(p + u)
       4) restore p, then p <- p - lr * g
 
