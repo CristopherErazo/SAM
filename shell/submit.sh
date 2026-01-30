@@ -1,26 +1,27 @@
 #!/bin/bash
 
 # Parameters
-d=500                  # Input dimension
+d=1000                  # Input dimension
 tch_act='tanh'        # Activation function for teacher
 std_act='tanh'        # Activation function for student
 n_test=8000           # Number of test samples
-bs=30                # Batch size for training
-lr=0.01                # Learning rate
+bs=10                # Batch size for training
+lr=0.5                # Learning rate
 eps=0.0               # Noise level for labels
 q=2.0                 # q-norm for SAM
-nprints=700            # Number of prints during training
+nprints=1000            # Number of prints during training
 nsteps=100000
   
 # # Loop over various configurations = (opt , gamma , rho)
 
 configurations=(
-    'SGD 0.0001 0.0'
-    'SGD 0.00001 0.0'
-    'SGD 0.0 0.0'
-    'SAM 0.0 0.1'
     'SAM 0.0 0.01'
+    'SAM 0.0 0.001'
+    'SGD 0.0 0.0'
+    'SGD 0.000001 0.0'
+    'SGD 0.0000001 0.0'
 )
+
 
 for config in "${configurations[@]}"; do
     read -r  opt gamma rho  <<< "$config"

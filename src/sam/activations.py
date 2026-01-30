@@ -3,25 +3,33 @@ import torch
 
 # Define activation functions and their derivatives
 def He1(x): return x
+def He1_deriv(x): return torch.ones_like(x)
 def He2(x): return (x**2 - 1) / math.sqrt(2)
+def He2_deriv(x): return 2 * x / math.sqrt(2)
 def He3(x): return (x**3 - 3 * x) / math.sqrt(6)
+def He3_deriv(x): return  (3 * x**2 - 3) / math.sqrt(6)
 def He4(x): return (x**4 - 6 * x**2 + 3) / math.sqrt(24)
+def He4_deriv(x): return  (4 * x**3 - 12 * x) / math.sqrt(24)
 def He5(x): return (x**5 - 10 * x**3 + 15 * x) / math.sqrt(120)
+def He5_deriv(x): return  (5 * x**4 - 30 * x**2 + 15) / math.sqrt(120)
 def relu(x): return torch.relu(x)
+def relu_deriv(x): return 1.0 * (x > 0)
 def tanh(x): return torch.tanh(x)
+def tanh_deriv(x): return 1 - torch.tanh(x)**2
 def sigmoid(x): return torch.sigmoid(x)
+def sigmoid_deriv(x): return sigmoid(x)*(1-sigmoid(x))
 
 
 # Dictionary to map function names to their implementations
 activations = {
-    "tanh": tanh,
-    "relu": relu,
-    "He1": He1,
-    "He2": He2,
-    "He3": He3,
-    "He4": He4,
-    "He5": He5,
-    "sigmoid": sigmoid
+    "tanh": (tanh, tanh_deriv),
+    "relu": (relu, relu_deriv),
+    "He1": (He1, He1_deriv),
+    "He2": (He2, He2_deriv),
+    "He3": (He3, He3_deriv),
+    "He4": (He4, He4_deriv),
+    "He5": (He5, He5_deriv),
+    "softmax": (sigmoid,sigmoid_deriv)
 }
 
 def _get_base_activation(name):
@@ -78,4 +86,13 @@ def get_activation(spec):
             term = coeff * f(x)
             out = term if out is None else out + term
         return out
-    return combined_f
+    
+    def combined_deriv(x):
+        out = None
+        for name, coeff in items:
+            _, fd = _get_base_activation(name)
+            term = coeff * fd(x)
+            out = term if out is None else out + term
+        return out
+
+    return combined_f, combined_deriv

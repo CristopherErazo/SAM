@@ -76,8 +76,8 @@ def main():
         'train_loss': [],
         'test_loss': [],
         'overlap': [], 
-        'norm_student': [],
-        'difference': []
+        'norm2': []
+
     }
 
 
@@ -102,18 +102,16 @@ def main():
                 test_loss = F.mse_loss(y_test, y_test_pred)
                 # Compute overlap and norm
                 w_student = torch.cat([p.view(-1) for p in student.parameters()])
-                norm_student = torch.norm(w_student)
-                overlap = torch.dot(w_teacher, w_student) / (norm_teacher * norm_student)
-                difference = torch.norm(w_teacher - w_student)
+                norm2 = torch.dot(w_student,w_student) / config['d']
+                overlap = torch.dot(w_teacher, w_student)   / config['d']
                 
             # Save to summary
             summary['step'].append(step)
             summary['train_loss'].append(loss.item())
             summary['test_loss'].append(test_loss.item())
             summary['overlap'].append(overlap.item())
-            summary['norm_student'].append(norm_student.item())
-            summary['difference'].append(difference.item())
-            print(f'Step {step+1}/{n_steps}, Train Loss: {loss.item():.4f}, Test Loss: {test_loss.item():.4f}, Overlap: {overlap.item():.4f}, Norm Student: {norm_student.item():.4f}')
+            summary['norm2'].append(norm2.item())
+            print(f'Step {step+1}/{n_steps}, Test Loss: {test_loss.item():.4f}, Overlap: {overlap.item():.4f}, Norm Student: {norm2.item():.4f}')
 
 
     for key in summary.keys():
