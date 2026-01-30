@@ -3,14 +3,14 @@
 # Parameters
 d=1000                  # Input dimension
 tch_act='tanh'        # Activation function for teacher
-std_act='tanh'        # Activation function for student
+std_act='He2'        # Activation function for student
 n_test=8000           # Number of test samples
 bs=10                # Batch size for training
-lr=0.5                # Learning rate
+lr=0.05                # Learning rate
 eps=0.0               # Noise level for labels
 q=2.0                 # q-norm for SAM
 nprints=1000            # Number of prints during training
-nsteps=100000
+nsteps=20000
   
 # # Loop over various configurations = (opt , gamma , rho)
 

@@ -89,7 +89,6 @@ def expectation_gauss_hermite(F, Q, Q_star, M, grid , weigths, kwargs={}):
     z2 = math.sqrt(2) * Z2.reshape(-1)
 
     Q = float(max(Q, 1e-12))
-    Q_star = float(max(Q_star, 1e-12))
 
     vals = F(z1, z2, M, Q, Q_star, **kwargs)
 
@@ -154,8 +153,11 @@ def derivatives(t,X,grid,weigths,funcs,parameters): # Q_star , grid , weigths , 
     gamma = parameters['gamma']
 
     M , Q = X
+
     M_exp = expectation_gauss_hermite(F_M, Q, Q_star, M, grid , weigths, kwargs={'rho':rho})
     Q_exp = expectation_gauss_hermite(F_Q, Q, Q_star, M, grid , weigths, kwargs={'rho':rho,'lr':lr})
+    
+    Q = float(max(Q, 1e-12))
 
     dM = -gamma*M - lr * M_exp
     dQ = -2*gamma*Q - lr * Q_exp
