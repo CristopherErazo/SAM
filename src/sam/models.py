@@ -315,6 +315,153 @@ def create_transformer(config:dict) -> tuple[AttentionOnlyTransformer, torch.dev
     #     if param.dim() > 1:
     #         torch.nn.init.normal_(param, mean=0.0, std=std_init)
 
+
+    return model, device
+
+
+
+
+
+
+
+
+
+class InductionHeadAttention(nn.Module):
+    def __init__(
+            self,
+            vocab_size: int,
+            seq_len: int,
+            dropout: float = 0.0,
+            ) -> None:
+        super().__init__()
+
+        self.seq_len = seq_len
+        self.vocab_size = vocab_size
+        self.d_model = vocab_size + seq_len
+        self.d_eff = self.seq_len
+        self.mask1 = torch.tril(torch.ones((seq_len,seq_len)),diagonal=0) == 0
+        self.mask2 = torch.tril(torch.ones((seq_len,seq_len)),diagonal=0) == 0
+
+        # Embeddings
+        self.embedding = nn.Embedding(vocab_size, vocab_size)
+        self.positions = nn.Embedding(seq_len,seq_len)
+
+        # First layer weights
+        self.WQ1 = nn.Linear(self.d_model, self.d_eff, bias=False)
+        self.WK1 = nn.Linear(self.d_model, self.d_eff, bias=False)
+        self.WV1 = nn.Linear(self.d_model, self.d_model, bias=False)
+
+        # Second layer weights
+        self.WQ2 = nn.Linear(self.d_model, self.vocab_size, bias=False)
+        self.WK2 = nn.Linear(self.d_model, self.vocab_size, bias=False)
+        self.WV2 = nn.Linear(self.d_model, self.vocab_size, bias=False)
+
+        # Dropout
+        self.dropout=nn.Dropout(dropout)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """ X: (batch_size, seq_len) list of token ids """
+
+        # Input embedding + positional encoding
+        E = self.embedding(input)  # (batch_size, seq_len, vocab_size)
+        P = self.positions(torch.arange(self.seq_len, device=input.device))  # (seq_len, seq_len)
+        P = P.unsqueeze(0).expand(input.size(0), -1, -1)  # (batch_size, seq_len, seq_len)
+        X = torch.cat([E, P], dim=-1)  # (batch_size, seq_len, d_model)
+
+        # FIRST LAYER
+        # Compute queries and keys
+        Q1 = self.WQ1(X)  # (batch_size, seq_len, d_eff)
+        K1 = self.WK1(X)  # (batch_size, seq_len, d_eff)
+        V1 = self.WV1(X)  # (batch_size, seq_len, d_model)
+
+        # Compute attention scores and attention weights with masking
+        S1 = torch.matmul(Q1, K1.transpose(-2, -1)) # (batch_size, seq_len, seq_len)
+        S1 = S1.masked_fill(self.mask1.unsqueeze(0).to(S1.device), float('-inf'))
+        A1 = S1.softmax(dim=-1)  # (batch_size, seq_len, seq_len)
+        A1 = self.dropout(A1)
+        Y1 = torch.matmul(A1, V1)  # (batch_size, seq_len, d_model)
+        Z1 = X + Y1  # (batch_size, seq_len, d_model)
+
+        # SECOND LAYER
+        # Compute queries and keys
+        Q2 = self.WQ2(Z1)  # (batch_size, seq_len, vocab_size)
+        K2 = self.WK2(Z1)  # (batch_size, seq_len, vocab_size)
+        V2 = self.WV2(Z1)  # (batch_size, seq_len, vocab_size)
+
+        # Compute attention scores and attention weights with masking
+        S2 = torch.matmul(Q2, K2.transpose(-2, -1)) # (batch_size, seq_len, seq_len)
+        S2 = S2.masked_fill(self.mask2.unsqueeze(0).to(S2.device), float('-inf'))
+        A2 = S2.softmax(dim=-1)  # (batch_size, seq_len, seq_len)
+        A2 = self.dropout(A2)
+        Y2 = torch.matmul(A2, V2)  # (batch_size, seq_len, vocab_size)
+
+        # Compute logit outputs as projection onto embeddings
+        logits = torch.matmul(Y2, self.embedding.weight.t())  # (batch_size, seq_len, vocab_size)
+
+        # Return logits at last position only
+        return  logits[:,-1,:]  # (batch_size, vocab_size)
     
+
+def planted_initialization(model: InductionHeadAttention, noise:float = 0.0) -> None:
+
+    V = model.vocab_size
+    L = model.seq_len
+    d_model = model.d_model
+
+    shift = torch.zeros((L, L))
+    shift[1:,:-1] = torch.eye(L-1)
+
+    M = torch.zeros((d_model, d_model))
+    M[:V,:V] = torch.eye(V)
+
+    K = torch.cat((torch.eye(V), torch.zeros((V,L))), dim=1)
+    
+
+    with torch.no_grad():
+        # Embeddings as one-hot encodding
+        model.embedding.weight.copy_(torch.eye(V))
+        # Positional encoding as one-hot encodding
+        model.positions.weight.copy_(torch.eye(L))
+
+        # First layer
+        model.WQ1.weight.copy_(torch.cat([torch.eye(L), torch.zeros((L, V))], dim=1)) 
+        model.WK1.weight.copy_(torch.cat([shift, torch.zeros((L, V))], dim=1))
+        model.WV1.weight.copy_(M)
+
+        # Second layer
+        model.WQ2.weight.copy_(K)
+        model.WK2.weight.copy_(K)
+        model.WV2.weight.copy_(K)
+    
+    # To each of the parameters above, add small random noise
+    for param in model.parameters():
+        param.data += noise * torch.randn_like(param)
+
+
+def create_induction_head(config:dict) -> tuple[InductionHeadAttention, torch.device]:
+
+    """Create an Induction Head Attention model based on the provided configuration.
+    Args:
+        config (dict): Configuration dictionary containing model parameters.
+                - vocab_size (int): size of the vocabulary 
+                - seq_len (int): maximum sequence length
+                - dropout (float): dropout rate 
+                - noise (float): standard deviation for planted initialization noise
+    Returns:
+        InductionHeadAttention: The created induction head attention model.
+        str: A string representation of the model device.
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device)
+
+    model = InductionHeadAttention(
+        vocab_size = config['vocab_size'],
+        seq_len = config['seq_len'],
+        dropout = config['dropout'],
+    ).to(device)
+
+    # Initialize the parameters with planted initialization
+
+    planted_initialization(model,noise=config['noise'])
 
     return model, device
