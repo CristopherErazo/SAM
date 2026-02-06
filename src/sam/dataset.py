@@ -61,7 +61,17 @@ class InContextDataset(Dataset):
         }
 
 def get_dataloader(config:dict) -> tuple[DataLoader,DataLoader]:
-    """Generate train and test dataloaders for the copying task."""
+    """Generate train and test dataloaders for the copying task. 
+    Args:
+        config (dict): Configuration dictionary with keys:
+            - dataset_size (int): Total dataset size
+            - train_fraction (float): Fraction of data for training
+            - seq_len (int): Length of each input sequence
+            - vocab_size (int): Size of the vocabulary
+            - batch_size (int): Batch size for dataloaders
+    Returns:
+        tuple: (train_dataloader, val_dataloader)    
+    """
     n = config['dataset_size']
     L = config['seq_len']
     V = config['vocab_size']

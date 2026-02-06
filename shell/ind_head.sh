@@ -2,20 +2,23 @@
 
 # Meta parameters
 n_prints=50 # Number of prints during training
-num_epochs=10 # Number of training epochs
+num_epochs=100 # Number of training epochs
 
 # Parameters
-vocab_size=40 # Vocabulary size
-seq_len=16  # Sequence length
+vocab_size=64 # Vocabulary size
+seq_len=32  # Sequence length
 batch_size=16 # Batch size
-dataset_size=10000 # Dataset size
+dataset_size=30000 # Dataset size
 train_fraction=0.8 # Fraction of data used for training
-dropout=0.0 # Dropout rate
-noise=0.0  # Noise level for parameter initialization
+dropout=0.05 # Dropout rate
+alpha=0.3  # Noise level for parameter initialization (interpolation parameter)
+beta_1=3.0  # Induction head beta_1 parameter
+beta_2=1.0  # Induction head beta_2 parameter
+beta_out=1.0  # Induction head beta_out parameter
 
 # Loop over various configurations = (lr)
 configurations=(
-    '0.00001'
+    '0.00005'
 )
 
 
@@ -31,6 +34,10 @@ for config in "${configurations[@]}"; do
         --num_epochs $num_epochs \
         --n_prints $n_prints \
         --dropout $dropout \
+        --alpha $alpha \
+        --beta_1 $beta_1 \
+        --beta_2 $beta_2 \
+        --beta_out $beta_out
         
     echo "Completed: at $(date)"
     echo "---"
