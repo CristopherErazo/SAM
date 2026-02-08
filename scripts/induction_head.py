@@ -71,8 +71,8 @@ def main():
     train_loader , val_loader = get_dataloader(config)
 
     # Define loss function and optimizer
-    CE_loss = nn.CrossEntropyLoss(label_smoothing=0.15)
-    optimizer = torch.optim.Adam(model.parameters(),lr=config['lr'],eps=1e-9,weight_decay=0.03)
+    CE_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
+    optimizer = torch.optim.Adam(model.parameters(),lr=config['lr'])
 
 
     # Training loop parameters
@@ -81,7 +81,7 @@ def main():
     print_every = max(1,tot_global_steps // nprints)
     global_step = 0
 
-    intervene_acc = [ 0.9] # List of val_accuracy_sample thresholds for intervention
+    intervene_acc = [ 1.9] # List of val_accuracy_sample thresholds for intervention
     n_interventions = 0
     tot_interventions = len(intervene_acc)
 
@@ -126,7 +126,7 @@ def main():
                     if param.requires_grad:
                         param_norm = param.data.norm(2).item()
                         text2 += f'{name}: {param_norm:.4f}  '
-                print(f'Step {global_step}/{tot_global_steps}  ' + text + '  ' + text2)
+                print(f'Step {global_step}/{tot_global_steps}  ' + text )#+ '  ' + text2)
             
 
             condition_intervention = n_interventions < tot_interventions and val_accuracy >= intervene_acc[n_interventions]
