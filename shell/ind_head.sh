@@ -2,15 +2,15 @@
 
 # Meta parameters
 n_prints=50 # Number of prints during training
-num_epochs=20 # Number of training epochs
+num_epochs=5 # Number of training epochs
 
 # Parameters
-vocab_size=64 # Vocabulary size
+vocab_size=128 # Vocabulary size
 seq_len=32  # Sequence length
 batch_size=16 # Batch size
-dataset_size=20000 # Dataset size
+dataset_size=1000 # Dataset size
 train_fraction=0.8 # Fraction of data used for training
-dropout=0.05 # Dropout rate
+dropout=0.00 # Dropout rate
 alpha=0.3  # Noise level for parameter initialization (interpolation parameter)
 beta_1=5.0  # Induction head beta_1 parameter
 beta_2=1.0  # Induction head beta_2 parameter

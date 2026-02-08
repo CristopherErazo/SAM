@@ -39,8 +39,7 @@ def main():
 
     # Create model in device
     model , device = create_induction_head(config)
-    planted_initialization(model,betas=(config['beta_1'], config['beta_2'], config['beta_out']))
-    interpolation_initialization(model, alpha=config['alpha'])
+    planted_initialization(model, alpha=config['alpha'],betas=(config['beta_1'], config['beta_2'], config['beta_out']))
 
     print("Model created on device:", device)
 
@@ -81,7 +80,7 @@ def main():
     print_every = max(1,tot_global_steps // nprints)
     global_step = 0
 
-    intervene_acc = [ 1.9] # List of val_accuracy_sample thresholds for intervention
+    intervene_acc = [1.9] # List of val_accuracy_sample thresholds for intervention
     n_interventions = 0
     tot_interventions = len(intervene_acc)
 

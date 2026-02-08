@@ -368,8 +368,8 @@ class InductionHeadAttention(nn.Module):
         """ X: (batch_size, seq_len) list of token ids """
 
         # Input embedding + positional encoding
-        E = self.embedding(input) #*math.sqrt(self.d_model)  # (batch_size, seq_len, vocab_size)
-        P = self.positions(torch.arange(self.seq_len, device=input.device)) #* math.sqrt(self.d_model)* # (seq_len, seq_len)
+        E = self.embedding(input)  # (batch_size, seq_len, vocab_size)
+        P = self.positions(torch.arange(self.seq_len, device=input.device)) # (seq_len, seq_len)
         P = P.unsqueeze(0).expand(input.size(0), -1, -1)  # (batch_size, seq_len, seq_len)
         X = torch.cat([E, P], dim=-1)  # (batch_size, seq_len, d_model)
 
@@ -380,7 +380,7 @@ class InductionHeadAttention(nn.Module):
         V1 = self.WV1(X)  # (batch_size, seq_len, d_model)
 
         # Compute attention scores and attention weights with masking
-        S1 = self.beta_1*torch.matmul(Q1, K1.transpose(-2, -1)) #/ math.sqrt(self.d_eff) # (batch_size, seq_len, seq_len)
+        S1 = self.beta_1*torch.matmul(Q1, K1.transpose(-2, -1)) * (self.d_model/self.seq_len)**2  # (batch_size, seq_len, seq_len)
         S1 = S1.masked_fill(self.mask1.unsqueeze(0).to(S1.device), float('-inf'))
         A1 = S1.softmax(dim=-1)  # (batch_size, seq_len, seq_len)
         A1 = self.dropout(A1)
@@ -394,19 +394,17 @@ class InductionHeadAttention(nn.Module):
         V2 = self.WV2(Z1)  # (batch_size, seq_len, vocab_size)
 
         # Compute attention scores and attention weights with masking
-        S2 = self.beta_2*torch.matmul(q2, K2.transpose(-2, -1)) #/math.sqrt(self.vocab_size) # (batch_size, 1, seq_len)
-        # S2 = S2.masked_fill(self.mask2.unsqueeze(0).to(S2.device), float('-inf'))
-        # S2[:,:,-1] = float('-inf')  # Prevent attending to the last token
+        S2 = self.beta_2*torch.matmul(q2, K2.transpose(-2, -1)) * (self.d_model/self.vocab_size)**2 # (batch_size, 1, seq_len)
         # Mask out all positions whose token is the same as the last token
-        last_tokens = input[:, -1].unsqueeze(1)  # (batch_size, 1)
-        token_mask = (input != last_tokens).unsqueeze(1)  # (batch_size, 1, seq_len)
+        # last_tokens = input[:, -1].unsqueeze(1)  # (batch_size, 1)
+        # token_mask = (input != last_tokens).unsqueeze(1)  # (batch_size, 1, seq_len)
         # S2 = S2.masked_fill(~token_mask.to(S2.device), float('-inf'))
         A2 = S2.softmax(dim=-1)  # (batch_size, 1, seq_len)
         A2 = self.dropout(A2)
         Y2 = torch.matmul(A2, V2)  # (batch_size, 1, vocab_size)
 
         # Compute logit outputs as projection onto embeddings
-        logits = self.beta_out*torch.matmul(Y2, self.embedding.weight.t()) #*math.sqrt(self.d_model/self.vocab_size) # (batch_size, 1, vocab_size)
+        logits = self.beta_out*torch.matmul(Y2, self.embedding.weight.t()) * (self.d_model/self.vocab_size)**1.5 # (batch_size, 1, vocab_size)
 
         # Return logits at last position only
         return  logits[:,0,:]  # (batch_size, vocab_size)
@@ -422,66 +420,79 @@ def interpolation_initialization(model: InductionHeadAttention, alpha: float = 0
         model (InductionHeadAttention): The model to initialize.
         alpha (float): Interpolation parameter between 0 and 1.
     """
-    # Create a temporary model with default initialization
 
 
-    std = 1.0 / math.sqrt(model.d_model)
+    # Create temporary model with random initialization and interpolate
+    temp_model = InductionHeadAttention(
+        vocab_size = model.vocab_size,
+        seq_len = model.seq_len,
+        dropout = 0.0,
+    ).to(next(model.parameters()).device)
+
+    planted_initialization(temp_model, alpha=0.0, betas=(model.beta_1.item(), model.beta_2.item(), model.beta_out.item()))
+
     with torch.no_grad():
-        for param in model.parameters():
+        for param, temp_param in zip(model.parameters(), temp_model.parameters()):
             # Skip scalar parameters (beta_1, beta_2, beta_out)
             if param.shape == torch.Size([]):
                 continue
-            param.copy_( math.sqrt(1 - alpha**2) * param + alpha * std * torch.randn_like(param) )
+            param.copy_( (1 - alpha) * param + alpha * temp_param )
 
-    # Create temporary model with default initialization and interpolate
-    # temp_model = InductionHeadAttention(
-    #     vocab_size = model.vocab_size,
-    #     seq_len = model.seq_len,
-    #     dropout = 0.0,
-    # ).to(next(model.parameters()).device)
-
-    # with torch.no_grad():
-    #     for param, temp_param in zip(model.parameters(), temp_model.parameters()):
-    #         # Skip scalar parameters (beta_1, beta_2, beta_out)
-    #         # if param.shape == torch.Size([]):
-    #         #     continue
-    #         param.copy_( (1 - alpha) * param + alpha * temp_param )
-    
-    
-def planted_initialization(model: InductionHeadAttention, betas: tuple) -> None:
+def planted_initialization(model: InductionHeadAttention, alpha:float,betas:tuple) -> None:
 
     V = model.vocab_size
     L = model.seq_len
     d_model = model.d_model
     beta_1, beta_2, beta_out = betas
+
+    sigma = 1.0 / math.sqrt(d_model)
+    a = alpha**(0.25)
+
+    # Constants for scaling
+    Ce = math.sqrt(V/d_model)
+    Cp = math.sqrt(L/d_model)
+    C1 = math.sqrt(L/d_model)
+    Cv1 = math.sqrt(V/d_model)
+
+    C2 = math.sqrt(V/d_model)
+
+
+    # Matrices
+    IdV = torch.eye(V)
+    IdL = torch.eye(L)
+    Zeros_LV = torch.zeros((L, V))
     shift = torch.zeros((L, L))
     shift[1:,:-1] = torch.eye(L-1)
 
+    # V1 = torch.zeros((d_model, d_model))
+    aux_V1 = torch.eye(V)
+    aux_V1 = a*Cv1*aux_V1 + (1-a)*sigma*torch.randn_like(aux_V1)
     M = torch.zeros((d_model, d_model))
-    M[:V,:V] = torch.eye(V)
+    M[:V,:V] = aux_V1*math.sqrt(d_model/V)
 
     K = torch.cat((torch.eye(V), torch.zeros((V,L))), dim=1)
 
     with torch.no_grad():
         # Embeddings as one-hot encodding
-        model.embedding.weight.copy_(torch.eye(V))
+        model.embedding.weight.copy_(Ce*torch.eye(V))
         # Positional encoding as one-hot encodding
-        model.positions.weight.copy_(torch.eye(L))
+        model.positions.weight.copy_(Cp*torch.eye(L))
 
         # First layer
-        model.WQ1.weight.copy_( torch.cat([ torch.zeros((L, V)),torch.eye(L)], dim=1)) 
-        model.WK1.weight.copy_( torch.cat([ torch.zeros((L, V)),shift], dim=1))
+        model.WQ1.weight.copy_( torch.cat([Zeros_LV, a*C1*IdL + (1-a)*sigma*torch.randn_like(IdL)] , dim=1)) 
+        model.WK1.weight.copy_( torch.cat([Zeros_LV, a*C1*shift + (1-a)*sigma*torch.randn_like(IdL)], dim=1))
         model.WV1.weight.copy_(M)
 
         # Second layer
-        model.WQ2.weight.copy_(K)
-        model.WK2.weight.copy_(K)
-        model.WV2.weight.copy_(K)
+        model.WQ2.weight.copy_(torch.cat([a*C2*IdV + (1-a)*sigma*torch.randn_like(IdV), Zeros_LV.T], dim=1))
+        model.WK2.weight.copy_(torch.cat([a*C2*IdV + (1-a)*sigma*torch.randn_like(IdV), Zeros_LV.T], dim=1))
+        model.WV2.weight.copy_(torch.cat([a*C2*IdV + (1-a)*sigma*torch.randn_like(IdV), Zeros_LV.T], dim=1))
 
         # Scalar parameters
         model.beta_1.copy_(torch.tensor(beta_1))
         model.beta_2.copy_(torch.tensor(beta_2))
         model.beta_out.copy_(torch.tensor(beta_out))
+
     
 
 def create_induction_head(config:dict) -> tuple[InductionHeadAttention, torch.device]:
