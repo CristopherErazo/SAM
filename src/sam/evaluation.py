@@ -30,3 +30,17 @@ def evaluate_model(model:torch.nn.Module, dataloader:torch.utils.data.DataLoader
     avg_accuracy = total_accuracy / len(dataloader.dataset)
     avg_accuracy_sample = total_accuracy_sample / len(dataloader.dataset)
     return avg_loss , avg_accuracy, avg_accuracy_sample
+
+def evaluate_overlap_with_teacher(model:torch.nn.Module, teacher_model:torch.nn.Module, device:torch.device):
+    model.eval()
+    teacher_model.eval()
+    # For each parameter in the model independently, compute the cosine similarity with the corresponding parameter in the teacher model
+    overlaps = {}
+    for (name, param), (teacher_name, teacher_param) in zip(model.named_parameters(), teacher_model.named_parameters()):
+        if param.requires_grad:
+            param_flat = param.view(-1)
+            teacher_param_flat = teacher_param.view(-1)
+            cosine_similarity = torch.nn.functional.cosine_similarity(param_flat, teacher_param_flat, dim=0).item()
+            square_distance = torch.sum((param_flat - teacher_param_flat) ** 2).item()
+            overlaps[name] = [cosine_similarity,square_distance]
+    return overlaps    

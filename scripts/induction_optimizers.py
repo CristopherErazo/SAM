@@ -4,9 +4,11 @@ import torch.nn as nn
 import numpy as np
 import time
 
-from sam.models import create_induction_head , planted_initialization, interpolation_initialization, InductionHeadAttentionSmaller, planted_initialization_small
+from sam.models import create_induction_head , planted_initialization, interpolation_initialization
+from sam.models import InductionHeadAttentionSmaller, planted_initialization_small, interpolation_initialization_smaller
 from sam.dataset import get_dataloader
-from sam.evaluation import evaluate_model
+from sam.evaluation import evaluate_model , evaluate_overlap_with_teacher
+from sam.optimizers import SAM_Optimizer
 
 from configurations import save_data , make_data_paths
 
@@ -24,24 +26,41 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--n_prints', type=int, default=50, help='Number of times to print during training.')
     parser.add_argument('--num_epochs', type=int, default=5, help='Number of training epochs.')
-    parser.add_argument('--alpha', type=float, default=0.05, help='Noise level for parameter initialization.')
-    parser.add_argument('--beta_1', type=float, default=1.0, help='Induction head beta_1 parameter.')
-    parser.add_argument('--beta_2', type=float, default=1.0, help='Induction head beta_2 parameter.')   
-    parser.add_argument('--beta_out', type=float, default=1.0, help='Induction head beta_out parameter.')
+    parser.add_argument('--alpha', type=float, default=0.5, help='Noise level for parameter initialization.')
+    parser.add_argument('--gamma',type=float,default=0.01,help='Weigth decay for sgd')
+    parser.add_argument('--rho',type=float,default=0.05,help='Rho parameter for SAM optimizer')
+    parser.add_argument('--opt', type=str, default='SGD', help='Type of optimizer: SGD, adam, or SAM')
+    parser.add_argument('--alpha_load', type=float, default=0.1, help='Alpha parameter for loading model checkpoint')
+    parser.add_argument('--lr_load', type=float, default=0.00005, help='Learning rate for loading model checkpoint')
 
     args = parser.parse_args()
     config = vars(args)
 
     print("Configuration:")
     print(config)
-    # for key in ['fr_emb']:
-    #     config[key] = True if config[key] == 'True' else False
 
-    # Create model in device
+    # Load reate model in device
+    fix_params = { key : config[key] for key in ['vocab_size','seq_len']}
+    fix_params['lr'] = config['lr_load']
+    variable_params = {'alpha': config['alpha_load']}
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
-    model = InductionHeadAttentionSmaller(config['vocab_size'], config['seq_len'], config['dropout']).to(device)
-    planted_initialization_small(model,alpha=config['alpha'],betas=(config['beta_1'], config['beta_2'], config['beta_out']))
+    teacher_model = InductionHeadAttentionSmaller(config['vocab_size'], config['seq_len']).to(device)
+    # teacher_model , device = create_induction_head(config)
+    params = {'fixed' : fix_params,
+              'variable': variable_params}
+    file_path , _, _ = make_data_paths(f'model_fin', experiment_name= 'small_induction_head', params=params,ext='pt',base_dir='./data')     
+    teacher_model.load_state_dict(torch.load(file_path, map_location=device))
+    
+    # Create a copy of the teacher model to be trained
+    model = InductionHeadAttentionSmaller(config['vocab_size'], config['seq_len']).to(device)
+    model.load_state_dict(teacher_model.state_dict())
+    model.to(device)
+    
+    # Interpolation initialization between teacher and random
+
+    interpolation_initialization_smaller(model, alpha=config['alpha'])
 
     print("Model created on device:", device)
 
@@ -65,15 +84,30 @@ def main():
     print("Trainable parameters:")
     for name, param in model.named_parameters():
         if param.requires_grad:
-            print(name)
+            print(name , param.shape)
 
+    print(f'\n Loss with uniform initialization = logV = {np.log(config["vocab_size"]):.4f}\n')
 
     # Get dataloaders
     train_loader , val_loader = get_dataloader(config)
 
     # Define loss function and optimizer
-    CE_loss = nn.CrossEntropyLoss(label_smoothing=0.05)
-    optimizer = torch.optim.Adam(model.parameters(),lr=config['lr'])
+    CE_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
+    # optimizer = torch.optim.Adam(model.parameters(),lr=config['lr'])
+
+    if config['opt'] == 'SGD':
+        optimizer = torch.optim.SGD(model.parameters(), lr=config['lr'],weight_decay=config['gamma'])
+        closure = None
+    elif config['opt'] == 'adam':
+        optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
+        closure = None  
+    elif config['opt'] == 'SAM':
+        optimizer =SAM_Optimizer(model.parameters(), lr=config['lr'], q=2, rho=config['rho'])
+        print('Using SAM optimizer with rho = ', config['rho'])
+        def closure():
+            logits = model(input) # (batch_size, vocab_size)
+            loss = CE_loss(logits.view(-1, config['vocab_size']), target.view(-1))
+            return loss
 
 
     # Training loop parameters
@@ -82,7 +116,7 @@ def main():
     print_every = max(1,tot_global_steps // nprints)
     global_step = 0
 
-    intervene_acc = [ 1.9] # List of val_accuracy_sample thresholds for intervention
+    intervene_acc = [1.9] # List of val_accuracy_sample thresholds for intervention
     n_interventions = 0
     tot_interventions = len(intervene_acc)
 
@@ -95,24 +129,26 @@ def main():
         'val_accuracy_sample': []
     }
 
+    aligment = { 
+        'overlap': {name : [] for (name, _) in model.named_parameters() },
+        'difference': {name : [] for (name, _) in model.named_parameters() }}
+
     # Save data
     fix_params = { key : config[key] for key in ['vocab_size','seq_len','lr']}
-    variable_params = { key : config[key] for key in ['alpha']}
+    variable_params = { key : config[key] for key in ['alpha','rho','gamma','opt']}
 
     params = {'fixed' : fix_params,
               'variable': variable_params}
 
     # Save checkpoint of model at the beggining of training
-    file_path , _, _ = make_data_paths('model_init', experiment_name= 'small_induction_head', params=params,ext='pt') 
+    file_path , _, _ = make_data_paths('model_init', experiment_name= 'post_small_induction_head', params=params,ext='pt') 
     print('Saving model checkpoint to ', file_path)
     torch.save(model.state_dict(), file_path)
-
-
-    print(f'\n Loss with uniform initialization = logV = {np.log(config["vocab_size"]):.4f}\n')
 
     # Example: Iterate through the training dataloader
     time_start = time.time()
     for epoch in range(config['num_epochs']):
+
         for batch in train_loader:
             input = batch['input'].to(device) # (batch_size, seq_len)
             target = batch['target'].to(device) # (batch_size, )
@@ -120,12 +156,14 @@ def main():
 
             logits = model(input) # (batch_size, vocab_size)
             loss = CE_loss(logits.view(-1, config['vocab_size']), target.view(-1))
-            loss.backward()
+            # loss.backward()
+
 
             # Check for print condition to evaluate and print
             if global_step % print_every == 0:
                 summary['step'].append(global_step)
                 val_loss , val_accuracy , val_accuracy_sample = evaluate_model(model, val_loader, device, CE_loss)
+                overlaps_step = evaluate_overlap_with_teacher(model, teacher_model, device)
                 # train_loss , train_accuracy = evaluate_model(model, train_loader, device, CE_loss)
                 
                 text = ''
@@ -133,6 +171,11 @@ def main():
                                           [val_loss, val_accuracy, val_accuracy_sample,loss.item()]):
                     text += f'{key}: {variable:.4f}  '
                     summary[key].append(variable)
+
+
+                for name in overlaps_step:
+                    aligment['overlap'][name].append(overlaps_step[name][0])
+                    aligment['difference'][name].append(overlaps_step[name][1])
                 
 
                 # Print norm of trainable parameters with name
@@ -141,62 +184,25 @@ def main():
                     if param.requires_grad:
                         param_norm = param.data.norm(2).item()
                         text2 += f'{name}: {param_norm:.4f}  '
-                print(f'Step {global_step}/{tot_global_steps}  ' + text + '  ' + text2)
+                print(f'Step {global_step}/{tot_global_steps}  ' + text )#+ '  ' + text2)
             
 
-            
-            # if global_step == int(0.7*tot_global_steps):
-            if False:
+            condition_intervention = n_interventions < tot_interventions and val_accuracy >= intervene_acc[n_interventions]
+            if condition_intervention:
                 print(f'Intervention at step {global_step} with val_accuracy {val_accuracy:.4f}')
-                CE_loss = nn.CrossEntropyLoss(label_smoothing=0.0)
-                # optimizer = torch.optim.Adam(model.parameters(),lr=config['lr']*0.5,weight_decay=0.01)
+                interpolation_initialization(model, alpha=0.1)
+                n_interventions += 1
 
 
             global_step += 1
-            optimizer.step()
             optimizer.zero_grad()
-    
-    # After training loop, continue training further for few epochs with no label smoothing
-    # and lower learning rate and strong regularization to see if we can further improve the performance and reach the optimal solution
-    # enforcing sparcity on the model parameters with L1 regularization and low learning rate to see if we can further improve the performance and reach the optimal solution
-    if False:
-        CE_loss = nn.CrossEntropyLoss(label_smoothing=0.0)
-        optimizer = torch.optim.Adam(model.parameters(),lr=config['lr']*0.2,weight_decay=0.01)
-        for epoch in range(5):
-            for batch in train_loader:
-                input = batch['input'].to(device) # (batch_size, seq_len)
-                target = batch['target'].to(device) # (batch_size, )
-                # mask = batch['mask'].to(device) # (1, seq_len, seq_len)
-
-                logits = model(input) # (batch_size, vocab_size)
-                loss = CE_loss(logits.view(-1, config['vocab_size']), target.view(-1))
+            if closure is None:
                 loss.backward()
-
-                # Check for print condition to evaluate and print
-                if global_step % print_every == 0:
-                    summary['step'].append(global_step)
-                    val_loss , val_accuracy , val_accuracy_sample = evaluate_model(model, val_loader, device, CE_loss)
-                    # train_loss , train_accuracy = evaluate_model(model, train_loader, device, CE_loss)
-                    
-                    text = ''
-                    for key , variable in zip(['val_loss','val_accuracy','val_accuracy_sample','train_loss',],
-                                            [val_loss, val_accuracy, val_accuracy_sample,loss.item()]):
-                        text += f'{key}: {variable:.4f}  '
-                        summary[key].append(variable)
-                    
-
-                    # Print norm of trainable parameters with name
-                    text2 = ''
-                    for name, param in model.named_parameters():
-                        if param.requires_grad:
-                            param_norm = param.data.norm(2).item()
-                            text2 += f'{name}: {param_norm:.4f}  '
-                    print(f'Step {global_step}/{tot_global_steps}  ' + text + '  ' + text2)
-                
-
-                global_step += 1
                 optimizer.step()
-                optimizer.zero_grad()
+            else:
+                optimizer.step(closure)
+            # optimizer.step()
+            
     
 
     print('Training completed.')
@@ -207,17 +213,25 @@ def main():
         summary[key] = np.array(summary[key])
         print(f'{key} : {summary[key].shape}')
 
+    for name in aligment['overlap']:
+        aligment['overlap'][name] = np.array(aligment['overlap'][name])
+        print(f"{name} : { aligment['overlap'][name].shape }")
+    
+    for name in aligment['difference']:
+        aligment['difference'][name] = np.array(aligment['difference'][name])
+        print(f"{name} : {aligment['difference'][name].shape}")
 
-    save_data(summary,'summary',experiment_name='small_induction_head', params=params)
+
+    save_data(summary,'summary',experiment_name='post_small_induction_head', params=params)
+    save_data(aligment,'aligment',experiment_name='post_small_induction_head', params=params)
 
     # Save checkpoint of model at the end of training
 
-    # Save checkpoint of model at the beggining of training
-    file_path , _, _ = make_data_paths('model_fin', experiment_name= 'small_induction_head', params=params,ext='pt') 
+    file_path , _, _ = make_data_paths('model_fin', experiment_name= 'post_small_induction_head', params=params,ext='pt') 
     print('Saving model checkpoint to ', file_path)
     torch.save(model.state_dict(), file_path)
     
     
 
 if __name__ == "__main__":
-    main()    
+    main()

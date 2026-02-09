@@ -429,7 +429,7 @@ def interpolation_initialization(model: InductionHeadAttention, alpha: float = 0
         dropout = 0.0,
     ).to(next(model.parameters()).device)
 
-    planted_initialization(temp_model, alpha=0.0, betas=(model.beta_1.item(), model.beta_2.item(), model.beta_out.item()))
+    planted_initialization(temp_model, alpha=1.0, betas=(model.beta_1.item(), model.beta_2.item(), model.beta_out.item()))
 
     with torch.no_grad():
         for param, temp_param in zip(model.parameters(), temp_model.parameters()):
@@ -446,7 +446,7 @@ def planted_initialization(model: InductionHeadAttention, alpha:float,betas:tupl
     beta_1, beta_2, beta_out = betas
 
     sigma = 1.0 / math.sqrt(d_model)
-    a = alpha**(0.25)
+    a = (1-alpha)#**(0.25)
 
     # Constants for scaling
     Ce = math.sqrt(V/d_model)
@@ -476,7 +476,7 @@ def planted_initialization(model: InductionHeadAttention, alpha:float,betas:tupl
         # Embeddings as one-hot encodding
         model.embedding.weight.copy_(Ce*torch.eye(V))
         # Positional encoding as one-hot encodding
-        model.positions.weight.copy_(Cp*torch.eye(L))
+        model.positions.weight.copy_(a*Cp*IdL + (1-a)*sigma*torch.randn_like(IdL))
 
         # First layer
         model.WQ1.weight.copy_( torch.cat([Zeros_LV, a*C1*IdL + (1-a)*sigma*torch.randn_like(IdL)] , dim=1)) 
@@ -493,6 +493,17 @@ def planted_initialization(model: InductionHeadAttention, alpha:float,betas:tupl
         model.beta_2.copy_(torch.tensor(beta_2))
         model.beta_out.copy_(torch.tensor(beta_out))
 
+        # Freeze all components that include Zeros_LV to maintain the planted structure
+        # model.WQ1.weight[:,:V].requires_grad = False
+        # model.WK1.weight[:,:V].requires_grad = False
+        # model.WV1.weight.requires_grad = False
+        # model.WV1.weight[:V,:V].requires_grad = False
+
+        # model.WQ2.weight[:,V:].requires_grad = False
+        # model.WK2.weight[:,V:].requires_grad = False
+        # model.WV2.weight[:,V:].requires_grad = False
+
+        # model.embedding.weight.requires_grad = False
     
 
 def create_induction_head(config:dict) -> tuple[InductionHeadAttention, torch.device]:
@@ -517,3 +528,174 @@ def create_induction_head(config:dict) -> tuple[InductionHeadAttention, torch.de
     ).to(device)
 
     return model, device
+
+
+
+
+
+class InductionHeadAttentionSmaller(nn.Module):
+    def __init__(
+            self,
+            vocab_size: int,
+            seq_len: int,
+            dropout: float = 0.0,
+            ) -> None:
+        super().__init__()
+
+        self.seq_len = seq_len
+        self.vocab_size = vocab_size
+        self.d_model = vocab_size + seq_len
+        self.d_eff = self.seq_len
+        self.mask1 = torch.tril(torch.ones((seq_len,seq_len)),diagonal=0) == 0
+        self.mask2 = torch.tril(torch.ones((seq_len,seq_len)),diagonal=0) == 0
+
+        # Embeddings
+        self.embedding = nn.Embedding(vocab_size, vocab_size)
+        self.positions = nn.Embedding(seq_len,seq_len)
+
+        # First layer weights
+        self.WQ1 = nn.Linear(self.seq_len, self.seq_len, bias=False)
+        self.WK1 = nn.Linear(self.seq_len, self.seq_len, bias=False)
+        self.WV1 = nn.Linear(self.vocab_size, self.vocab_size, bias=False)
+
+        # Second layer weights
+        self.WQ2 = nn.Linear(self.vocab_size, self.vocab_size, bias=False)
+        self.WK2 = nn.Linear(self.vocab_size, self.vocab_size, bias=False)
+        self.WV2 = nn.Linear(self.vocab_size, self.vocab_size, bias=False)
+
+        # Dropout
+        self.dropout=nn.Dropout(dropout)
+
+        # Scalar Parameters
+        self.beta_1 = nn.Parameter(torch.tensor(1.0))
+        self.beta_2 = nn.Parameter(torch.tensor(1.0))
+        self.beta_out = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """ X: (batch_size, seq_len) list of token ids """
+
+        # Input embedding + positional encoding
+        E = self.embedding(input)  # (batch_size, seq_len, vocab_size)
+        P = self.positions(torch.arange(self.seq_len, device=input.device)) # (seq_len, seq_len)
+
+        # FIRST LAYER
+        # Compute queries and keys
+        Q1 = self.WQ1(P)  # ( seq_len, seq_len)
+        K1 = self.WK1(P)  # ( seq_len, seq_len)
+        V1 = self.WV1(E)  # (batch_size, seq_len, vocab_size)
+
+        # Compute attention scores and attention weights with masking
+        S1 = self.beta_1*torch.matmul(Q1, K1.transpose(-2, -1)) * (self.d_model/self.seq_len)**2  # ( seq_len, seq_len)
+        S1 = S1.masked_fill(self.mask1.to(S1.device), float('-inf'))
+        A1 = S1.softmax(dim=-1).unsqueeze(0).expand(input.size(0), -1, -1)   # (batch_size, seq_len, seq_len)
+        A1 = self.dropout(A1)
+        Y1 = torch.matmul(A1, V1)  # (batch_size, seq_len, vocab_size)
+        Z1 = E + Y1  # (batch_size, seq_len, vocab_size)
+
+        # SECOND LAYER
+        # Compute queries and keys
+        q2 = self.WQ2(Z1[:,-1]).unsqueeze(1)  # (batch_size, 1 , vocab_size)
+        K2 = self.WK2(Z1)  # (batch_size, seq_len, vocab_size)
+        V2 = self.WV2(Z1)  # (batch_size, seq_len, vocab_size)
+
+        # Compute attention scores and attention weights with masking
+        S2 = self.beta_2*torch.matmul(q2, K2.transpose(-2, -1)) * (self.d_model/self.vocab_size)**2 # (batch_size, 1, seq_len)
+        # Mask out all positions whose token is the same as the last token
+        # last_tokens = input[:, -1].unsqueeze(1)  # (batch_size, 1)
+        # token_mask = (input != last_tokens).unsqueeze(1)  # (batch_size, 1, seq_len)
+        # S2 = S2.masked_fill(~token_mask.to(S2.device), float('-inf'))
+        A2 = S2.softmax(dim=-1)  # (batch_size, 1, seq_len)
+        A2 = self.dropout(A2)
+        Y2 = torch.matmul(A2, V2)  # (batch_size, 1, vocab_size)
+
+        # Compute logit outputs as projection onto embeddings
+        logits = self.beta_out*torch.matmul(Y2, self.embedding.weight.t()) * (self.d_model/self.vocab_size)**1.5 # (batch_size, 1, vocab_size)
+
+        # Return logits at last position only
+        return  logits[:,0,:]  # (batch_size, vocab_size)
+    
+
+
+def planted_initialization_small(model: InductionHeadAttentionSmaller, alpha:float,betas:tuple) -> None:
+
+    V = model.vocab_size
+    L = model.seq_len
+    d_model = model.d_model
+    beta_1, beta_2, beta_out = betas
+
+    sigma = 1.0 / math.sqrt(d_model)
+    a = (1-alpha)#**(0.25)
+
+    # Constants for scaling
+    Ce = math.sqrt(V/d_model)
+    Cp = math.sqrt(L/d_model)
+    C1 = math.sqrt(L/d_model)
+    Cv1 = math.sqrt(V/d_model)
+
+    C2 = math.sqrt(V/d_model)
+
+
+    # Matrices
+    IdV = torch.eye(V)
+    IdL = torch.eye(L)
+    Zeros_LV = torch.zeros((L, V))
+    shift = torch.zeros((L, L))
+    shift[1:,:-1] = torch.eye(L-1)
+
+    # V1 = torch.zeros((d_model, d_model))
+    aux_V1 = torch.eye(V)
+    aux_V1 = a*Cv1*aux_V1 + (1-a)*sigma*torch.randn_like(aux_V1)
+    M = aux_V1*math.sqrt(d_model/V)
+
+    K = torch.cat((torch.eye(V), torch.zeros((V,L))), dim=1)
+
+    with torch.no_grad():
+        # Embeddings as one-hot encodding
+        model.embedding.weight.copy_(Ce*torch.eye(V))
+        # Positional encoding as one-hot encodding
+        model.positions.weight.copy_(a*Cp*IdL + (1-a)*sigma*torch.randn_like(IdL))
+
+        # First layer
+        model.WQ1.weight.copy_(a*C1*IdL + (1-a)*sigma*torch.randn_like(IdL)) 
+        model.WK1.weight.copy_(a*C1*shift + (1-a)*sigma*torch.randn_like(IdL))
+        model.WV1.weight.copy_(M)
+
+        # Second layer
+        model.WQ2.weight.copy_(a*C2*IdV + (1-a)*sigma*torch.randn_like(IdV))
+        model.WK2.weight.copy_(a*C2*IdV + (1-a)*sigma*torch.randn_like(IdV))
+        model.WV2.weight.copy_(a*C2*IdV + (1-a)*sigma*torch.randn_like(IdV))
+
+        # Scalar parameters
+        model.beta_1.copy_(torch.tensor(beta_1))
+        model.beta_2.copy_(torch.tensor(beta_2))
+        model.beta_out.copy_(torch.tensor(beta_out))
+
+
+def interpolation_initialization_smaller(model: InductionHeadAttentionSmaller, alpha: float = 0.0) -> None:
+    """Initialize the Induction Head Attention model with interpolation initialization.
+    
+    The interpolation is between the model's current parameters and random 
+    gaussian parameters with std = 1/sqrt(d_model). The interpolation is controlled by the alpha parameter, where:
+    - alpha = 0 corresponds to the original parameters (no change)
+    - alpha = 1 corresponds to completely random parameters (full change)
+    Args:        
+        model (InductionHeadAttention): The model to initialize.
+        alpha (float): Interpolation parameter between 0 and 1.
+    """
+
+
+    # Create temporary model with random initialization and interpolate
+    temp_model = InductionHeadAttentionSmaller(
+        vocab_size = model.vocab_size,
+        seq_len = model.seq_len,
+        dropout = 0.0,
+    ).to(next(model.parameters()).device)
+
+    planted_initialization_small(temp_model, alpha=1.0, betas=(model.beta_1.item(), model.beta_2.item(), model.beta_out.item()))
+
+    with torch.no_grad():
+        for param, temp_param in zip(model.parameters(), temp_model.parameters()):
+            # Skip scalar parameters (beta_1, beta_2, beta_out)
+            if param.shape == torch.Size([]):
+                continue
+            param.copy_( (1 - alpha) * param + alpha * temp_param )
