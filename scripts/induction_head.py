@@ -9,6 +9,7 @@ import time
 from sam.small_models import noisy_initialization
 from sam.dataset import get_dataloader
 from sam.evaluation import evaluate_model
+from sam.optimizers import SAM_Optimizer
 
 from configurations import save_data , make_data_paths
 
@@ -32,6 +33,9 @@ def main():
     parser.add_argument('--beta_out', type=float, default=1.0, help='Induction head beta_out parameter.')
     parser.add_argument('--sigma', type=float, default=0.5, help='Sigma for interpolation initialization.')
     parser.add_argument('--cV', type=float, default=1.0, help='Coefficient for WV1.')
+    parser.add_argument('--gamma',type=float,default=0.01,help='Weigth decay for sgd')
+    parser.add_argument('--rho',type=float,default=0.05,help='Rho parameter for SAM optimizer')
+    parser.add_argument('--opt', type=str, default='SGD', help='Type of optimizer: SGD, adam, or SAM')
 
     args = parser.parse_args()
     config = vars(args)
@@ -40,7 +44,7 @@ def main():
     print(config)
 
     # Create model and move to device
-    train_list = ['WQ1.weight', 'WK1.weight','WV1.weight']
+    train_list = ['WQ1.weight', 'WK1.weight','WV1.weight','WQ2.weight', 'WK2.weight']
     model , device = noisy_initialization(config, train_list=train_list)
     print("Model created on device:", device)
 
@@ -55,14 +59,28 @@ def main():
         if name not in train_list:
             param.requires_grad = False
 
+
     # Get dataloaders
     train_loader , val_loader = get_dataloader(config)
 
     # Define loss function and optimizer
     CE_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
     # optimizer = torch.optim.Adam(model.parameters(),lr=config['lr'])
-    optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=config['lr'])
+    # optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=config['lr'])
 
+    if config['opt'] == 'SGD':
+        optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=config['lr'],weight_decay=config['gamma'])
+        closure = None
+    elif config['opt'] == 'adam':
+        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=config['lr'])
+        closure = None  
+    elif config['opt'] == 'SAM':
+        optimizer = SAM_Optimizer(filter(lambda p: p.requires_grad, model.parameters()), lr=config['lr'], q=2, rho=config['rho'])
+        print('Using SAM optimizer with rho = ', config['rho'])
+        def closure():
+            logits = model(input) # (batch_size, vocab_size)
+            loss = CE_loss(logits.view(-1, config['vocab_size']), target.view(-1))
+            return loss
 
     # Training loop parameters
     tot_global_steps = config['num_epochs']*len(train_loader)
@@ -103,7 +121,7 @@ def main():
             target = batch['target'].to(device) # (batch_size, )
             logits = model(input) # (batch_size, vocab_size)
             loss = CE_loss(logits.view(-1, config['vocab_size']), target.view(-1))
-            loss.backward()
+            # loss.backward()
 
             # Check for print condition to evaluate and print
             if global_step % print_every == 0:
@@ -120,7 +138,11 @@ def main():
             
 
             global_step += 1
-            optimizer.step()
+            if closure is None:
+                loss.backward()
+                optimizer.step()
+            else:
+                optimizer.step(closure)
             optimizer.zero_grad()
     
     
