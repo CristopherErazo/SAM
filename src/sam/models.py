@@ -547,7 +547,7 @@ class InductionHeadAttentionSmaller(nn.Module):
         self.d_model = vocab_size + seq_len
         self.d_eff = self.seq_len
         self.mask1 = torch.tril(torch.ones((seq_len,seq_len)),diagonal=0) == 0
-        self.mask2 = torch.tril(torch.ones((seq_len,seq_len)),diagonal=0) == 0
+        self.mask2 = torch.tensor([[[False]*(self.seq_len-1) + [True]]])
 
         # Embeddings
         self.embedding = nn.Embedding(vocab_size, vocab_size)
@@ -570,7 +570,66 @@ class InductionHeadAttentionSmaller(nn.Module):
         self.beta_1 = nn.Parameter(torch.tensor(1.0))
         self.beta_2 = nn.Parameter(torch.tensor(1.0))
         self.beta_out = nn.Parameter(torch.tensor(1.0))
+    
 
+    def full_output(self, input: torch.Tensor) -> torch.Tensor:
+        """ X: (batch_size, seq_len) list of token ids """
+        with torch.no_grad():
+            output = {}
+            # Input embedding + positional encoding
+            E = self.embedding(input)  # (batch_size, seq_len, vocab_size)
+            P = self.positions(torch.arange(self.seq_len, device=input.device)) # (seq_len, seq_len)
+            output['E'] = E.detach().cpu().numpy()
+            output['P'] = P.detach().cpu().numpy()
+            # FIRST LAYER
+            # Compute queries and keys
+            Q1 = self.WQ1(P)  # ( seq_len, seq_len)
+            K1 = self.WK1(P)  # ( seq_len, seq_len)
+            V1 = self.WV1(E)  # (batch_size, seq_len, vocab_size)
+            output['Q1'] = Q1.detach().cpu().numpy()
+            output['K1'] = K1.detach().cpu().numpy()
+            output['V1'] = V1.detach().cpu().numpy()
+
+            # Compute attention scores and attention weights with masking
+            S1 = math.sqrt(self.seq_len)*self.beta_1*torch.matmul(Q1, K1.transpose(-2, -1)) * (self.d_model/self.seq_len)**2  # ( seq_len, seq_len)
+            S1 = S1.masked_fill(self.mask1.to(S1.device), float('-inf'))
+            output['S1'] = S1.detach().cpu().numpy()
+            A1 = S1.softmax(dim=-1).unsqueeze(0).expand(input.size(0), -1, -1)   # (batch_size, seq_len, seq_len)
+            # Zero the first attention weight
+            A1[:,0,:] = 0.0
+            output['A1'] = A1.detach().cpu().numpy()
+            A1 = self.dropout(A1)
+            Y1 = torch.matmul(A1, V1)  # (batch_size, seq_len, vocab_size)
+            output['Y1'] = Y1.detach().cpu().numpy()
+            Z1 = E + Y1  # (batch_size, seq_len, vocab_size)
+            output['Z1'] = Z1.detach().cpu().numpy()
+            # SECOND LAYER
+            # Compute queries and keys
+            q2 = self.WQ2(Z1[:,-1]).unsqueeze(1)  # (batch_size, 1 , vocab_size)
+            K2 = self.WK2(Z1)  # (batch_size, seq_len, vocab_size)
+            V2 = self.WV2(E)  # (batch_size, seq_len, vocab_size)
+            output['q2'] = q2.detach().cpu().numpy()
+            output['K2'] = K2.detach().cpu().numpy()
+            output['V2'] = V2.detach().cpu().numpy()
+
+            # Compute attention scores and attention weights with masking
+            S2 = math.sqrt(self.seq_len)*self.beta_2*torch.matmul(q2, K2.transpose(-2, -1)) * (self.d_model/self.vocab_size)**2 # (batch_size, 1, seq_len)
+            # Mask out last position
+            S2[:,:,-1] = float('-inf')
+            output['S2'] = S2.detach().cpu().numpy()
+            A2 = S2.softmax(dim=-1)  # (batch_size, 1, seq_len)
+            output['A2'] = A2.detach().cpu().numpy()
+            A2 = self.dropout(A2)
+
+            Y2 = torch.matmul(A2, V2)  # (batch_size, 1, vocab_size)
+            output['Y2'] = Y2.detach().cpu().numpy()
+
+            # Compute logit outputs as projection onto embeddings
+            logits = math.sqrt(self.vocab_size)*self.beta_out*torch.matmul(Y2, self.embedding.weight.t()) * (self.d_model/self.vocab_size)**1.5 # (batch_size, 1, vocab_size)
+            output['logits'] = logits.detach().cpu().numpy()
+        return output
+    
+        # Return logits at last position only
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """ X: (batch_size, seq_len) list of token ids """
 
@@ -585,9 +644,11 @@ class InductionHeadAttentionSmaller(nn.Module):
         V1 = self.WV1(E)  # (batch_size, seq_len, vocab_size)
 
         # Compute attention scores and attention weights with masking
-        S1 = self.beta_1*torch.matmul(Q1, K1.transpose(-2, -1)) * (self.d_model/self.seq_len)**2  # ( seq_len, seq_len)
+        S1 = math.sqrt(self.seq_len)*self.beta_1*torch.matmul(Q1, K1.transpose(-2, -1)) * (self.d_model/self.seq_len)**2  # ( seq_len, seq_len)
         S1 = S1.masked_fill(self.mask1.to(S1.device), float('-inf'))
-        A1 = S1.softmax(dim=-1).unsqueeze(0).expand(input.size(0), -1, -1)   # (batch_size, seq_len, seq_len)
+        A1 = S1.softmax(dim=-1).unsqueeze(0).expand(input.size(0), -1, -1).clone()   # (batch_size, seq_len, seq_len)
+        # Zero the first attention weight
+        A1[:,0,:] = 0.0
         A1 = self.dropout(A1)
         Y1 = torch.matmul(A1, V1)  # (batch_size, seq_len, vocab_size)
         Z1 = E + Y1  # (batch_size, seq_len, vocab_size)
@@ -596,20 +657,21 @@ class InductionHeadAttentionSmaller(nn.Module):
         # Compute queries and keys
         q2 = self.WQ2(Z1[:,-1]).unsqueeze(1)  # (batch_size, 1 , vocab_size)
         K2 = self.WK2(Z1)  # (batch_size, seq_len, vocab_size)
-        V2 = self.WV2(Z1)  # (batch_size, seq_len, vocab_size)
+        V2 = self.WV2(E)  # (batch_size, seq_len, vocab_size)
 
         # Compute attention scores and attention weights with masking
-        S2 = self.beta_2*torch.matmul(q2, K2.transpose(-2, -1)) * (self.d_model/self.vocab_size)**2 # (batch_size, 1, seq_len)
-        # Mask out all positions whose token is the same as the last token
-        # last_tokens = input[:, -1].unsqueeze(1)  # (batch_size, 1)
-        # token_mask = (input != last_tokens).unsqueeze(1)  # (batch_size, 1, seq_len)
-        # S2 = S2.masked_fill(~token_mask.to(S2.device), float('-inf'))
+        S2 = math.sqrt(self.seq_len)*self.beta_2*torch.matmul(q2, K2.transpose(-2, -1)) * (self.d_model/self.vocab_size)**2 # (batch_size, 1, seq_len)
+        # Mask out last position
+        S2 = S2.masked_fill(self.mask2.to(S2.device), float('-inf'))
+
         A2 = S2.softmax(dim=-1)  # (batch_size, 1, seq_len)
+        
         A2 = self.dropout(A2)
+
         Y2 = torch.matmul(A2, V2)  # (batch_size, 1, vocab_size)
 
         # Compute logit outputs as projection onto embeddings
-        logits = self.beta_out*torch.matmul(Y2, self.embedding.weight.t()) * (self.d_model/self.vocab_size)**1.5 # (batch_size, 1, vocab_size)
+        logits = math.sqrt(self.vocab_size)*self.beta_out*torch.matmul(Y2, self.embedding.weight.t()) * (self.d_model/self.vocab_size)**1.5 # (batch_size, 1, vocab_size)
 
         # Return logits at last position only
         return  logits[:,0,:]  # (batch_size, vocab_size)
@@ -651,24 +713,24 @@ def planted_initialization_small(model: InductionHeadAttentionSmaller, alpha:flo
 
     with torch.no_grad():
         # Embeddings as one-hot encodding
-        model.embedding.weight.copy_(Ce*torch.eye(V))
+        model.embedding.weight.data.copy_(Ce*torch.eye(V))
         # Positional encoding as one-hot encodding
-        model.positions.weight.copy_(a*Cp*IdL + (1-a)*sigma*torch.randn_like(IdL))
+        model.positions.weight.data.copy_(a*Cp*IdL + (1-a)*sigma*torch.randn_like(IdL))
 
         # First layer
-        model.WQ1.weight.copy_(a*C1*IdL + (1-a)*sigma*torch.randn_like(IdL)) 
-        model.WK1.weight.copy_(a*C1*shift + (1-a)*sigma*torch.randn_like(IdL))
-        model.WV1.weight.copy_(M)
+        model.WQ1.weight.data.copy_(a*C1*IdL + (1-a)*sigma*torch.randn_like(IdL)) 
+        model.WK1.weight.data.copy_(a*C1*shift + (1-a)*sigma*torch.randn_like(IdL))
+        model.WV1.weight.data.copy_(M)
 
         # Second layer
-        model.WQ2.weight.copy_(a*C2*IdV + (1-a)*sigma*torch.randn_like(IdV))
-        model.WK2.weight.copy_(a*C2*IdV + (1-a)*sigma*torch.randn_like(IdV))
-        model.WV2.weight.copy_(a*C2*IdV + (1-a)*sigma*torch.randn_like(IdV))
+        model.WQ2.weight.data.copy_(a*C2*IdV + (1-a)*sigma*torch.randn_like(IdV))
+        model.WK2.weight.data.copy_(a*C2*IdV + (1-a)*sigma*torch.randn_like(IdV))
+        model.WV2.weight.data.copy_(a*C2*IdV + (1-a)*sigma*torch.randn_like(IdV))
 
         # Scalar parameters
-        model.beta_1.copy_(torch.tensor(beta_1))
-        model.beta_2.copy_(torch.tensor(beta_2))
-        model.beta_out.copy_(torch.tensor(beta_out))
+        model.beta_1.data.copy_(torch.tensor(beta_1))
+        model.beta_2.data.copy_(torch.tensor(beta_2))
+        model.beta_out.data.copy_(torch.tensor(beta_out))
 
 
 def interpolation_initialization_smaller(model: InductionHeadAttentionSmaller, alpha: float = 0.0) -> None:

@@ -18,14 +18,25 @@ def get_sample(V,L):
         l = len(index)
         nsteps += 1
     target = input[index[-2]+1]
+
+    # Return input.shape = (L,) and target.shape = () for compatibility with CrossEntropyLoss
     return input, target, nsteps
 
+def get_sample_permut(V,L):
+    assert V >= L-1, "Vocabulary size must be greater than or equal to sequence length - 1 for permutation task."
+    input = torch.randperm(V)[:L-1]
+    # Get random location on the sequence 
+    loc = torch.randint(0,L-3,(1,)).item()
+    input = torch.cat([input,input[loc].unsqueeze(0)],dim=0)
+    target = input[loc+1]
+    # Return input.shape = (L,) and target.shape = () for compatibility with CrossEntropyLoss
+    return input, target, 0
 
 def generate_copying_data(num_samples:int, seq_len:int, vocab_size:int):
     """Generate a dataset for the copying task."""
     data = []
     for _ in range(num_samples):
-        input , target, nsteps = get_sample(vocab_size, seq_len)
+        input , target, nsteps = get_sample_permut(vocab_size, seq_len)
         data.append({
             'input' : input,
             'target' : target,

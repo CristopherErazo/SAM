@@ -4,7 +4,9 @@ import torch.nn as nn
 import numpy as np
 import time
 
-from sam.models import create_induction_head , planted_initialization, interpolation_initialization, InductionHeadAttentionSmaller, planted_initialization_small
+# from sam.models import create_induction_head , planted_initialization, interpolation_initialization, InductionHeadAttentionSmaller, planted_initialization_small
+# from sam.small_models import InductionHeadAttention, warm_initialization, interpolation_initialization
+from sam.small_models import noisy_initialization
 from sam.dataset import get_dataloader
 from sam.evaluation import evaluate_model
 
@@ -28,21 +30,18 @@ def main():
     parser.add_argument('--beta_1', type=float, default=1.0, help='Induction head beta_1 parameter.')
     parser.add_argument('--beta_2', type=float, default=1.0, help='Induction head beta_2 parameter.')   
     parser.add_argument('--beta_out', type=float, default=1.0, help='Induction head beta_out parameter.')
+    parser.add_argument('--sigma', type=float, default=0.5, help='Sigma for interpolation initialization.')
+    parser.add_argument('--cV', type=float, default=1.0, help='Coefficient for WV1.')
 
     args = parser.parse_args()
     config = vars(args)
 
     print("Configuration:")
     print(config)
-    # for key in ['fr_emb']:
-    #     config[key] = True if config[key] == 'True' else False
 
-    # Create model in device
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
-    model = InductionHeadAttentionSmaller(config['vocab_size'], config['seq_len'], config['dropout']).to(device)
-    planted_initialization_small(model,alpha=config['alpha'],betas=(config['beta_1'], config['beta_2'], config['beta_out']))
-
+    # Create model and move to device
+    train_list = ['WQ1.weight', 'WK1.weight','WV1.weight']
+    model , device = noisy_initialization(config, train_list=train_list)
     print("Model created on device:", device)
 
     # Freeze some parameters if needed
@@ -51,29 +50,18 @@ def main():
     # 'WQ1.weight', 'WK1.weight', 'WV1.weight', 
     # 'WQ2.weight', 'WK2.weight', 'WV2.weight']
 
-    train_list = ['beta_1','beta_2','beta_out',
-                  'positions.weight',
-                  'WQ1.weight', 'WK1.weight', 'WV1.weight', 
-                  'WQ2.weight', 'WK2.weight', 'WV2.weight'] # List of parameters to train (unfreeze)
-
     # Freeze all parameters except the ones on the train_list
     for name, param in model.named_parameters():
         if name not in train_list:
             param.requires_grad = False
 
-    # Print trainable parameters
-    print("Trainable parameters:")
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            print(name)
-
-
     # Get dataloaders
     train_loader , val_loader = get_dataloader(config)
 
     # Define loss function and optimizer
-    CE_loss = nn.CrossEntropyLoss(label_smoothing=0.05)
-    optimizer = torch.optim.Adam(model.parameters(),lr=config['lr'])
+    CE_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
+    # optimizer = torch.optim.Adam(model.parameters(),lr=config['lr'])
+    optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=config['lr'])
 
 
     # Training loop parameters
@@ -82,9 +70,6 @@ def main():
     print_every = max(1,tot_global_steps // nprints)
     global_step = 0
 
-    intervene_acc = [ 1.9] # List of val_accuracy_sample thresholds for intervention
-    n_interventions = 0
-    tot_interventions = len(intervene_acc)
 
     # Dictionary to store process
     summary = {
@@ -92,12 +77,12 @@ def main():
         'train_loss': [],
         'val_loss': [],
         'val_accuracy': [],
-        'val_accuracy_sample': []
+        'target_mass': []
     }
 
     # Save data
     fix_params = { key : config[key] for key in ['vocab_size','seq_len','lr']}
-    variable_params = { key : config[key] for key in ['alpha']}
+    variable_params = { key : config[key] for key in ['alpha','cV']}
 
     params = {'fixed' : fix_params,
               'variable': variable_params}
@@ -116,8 +101,6 @@ def main():
         for batch in train_loader:
             input = batch['input'].to(device) # (batch_size, seq_len)
             target = batch['target'].to(device) # (batch_size, )
-            # mask = batch['mask'].to(device) # (1, seq_len, seq_len)
-
             logits = model(input) # (batch_size, vocab_size)
             loss = CE_loss(logits.view(-1, config['vocab_size']), target.view(-1))
             loss.backward()
@@ -125,78 +108,21 @@ def main():
             # Check for print condition to evaluate and print
             if global_step % print_every == 0:
                 summary['step'].append(global_step)
-                val_loss , val_accuracy , val_accuracy_sample = evaluate_model(model, val_loader, device, CE_loss)
-                # train_loss , train_accuracy = evaluate_model(model, train_loader, device, CE_loss)
-                
+                val_loss , val_accuracy , target_mass = evaluate_model(model, val_loader, device, CE_loss)
+
                 text = ''
-                for key , variable in zip(['val_loss','val_accuracy','val_accuracy_sample','train_loss',],
-                                          [val_loss, val_accuracy, val_accuracy_sample,loss.item()]):
+                for key , variable in zip(['val_loss','val_accuracy','target_mass','train_loss',],
+                                          [val_loss, val_accuracy, target_mass,loss.item()]):
                     text += f'{key}: {variable:.4f}  '
                     summary[key].append(variable)
                 
-
-                # Print norm of trainable parameters with name
-                text2 = ''
-                for name, param in model.named_parameters():
-                    if param.requires_grad:
-                        param_norm = param.data.norm(2).item()
-                        text2 += f'{name}: {param_norm:.4f}  '
-                print(f'Step {global_step}/{tot_global_steps}  ' + text + '  ' + text2)
+                print(f'Step {global_step}/{tot_global_steps}  ' + text )
             
-
-            
-            # if global_step == int(0.7*tot_global_steps):
-            if False:
-                print(f'Intervention at step {global_step} with val_accuracy {val_accuracy:.4f}')
-                CE_loss = nn.CrossEntropyLoss(label_smoothing=0.0)
-                # optimizer = torch.optim.Adam(model.parameters(),lr=config['lr']*0.5,weight_decay=0.01)
-
 
             global_step += 1
             optimizer.step()
             optimizer.zero_grad()
     
-    # After training loop, continue training further for few epochs with no label smoothing
-    # and lower learning rate and strong regularization to see if we can further improve the performance and reach the optimal solution
-    # enforcing sparcity on the model parameters with L1 regularization and low learning rate to see if we can further improve the performance and reach the optimal solution
-    if False:
-        CE_loss = nn.CrossEntropyLoss(label_smoothing=0.0)
-        optimizer = torch.optim.Adam(model.parameters(),lr=config['lr']*0.2,weight_decay=0.01)
-        for epoch in range(5):
-            for batch in train_loader:
-                input = batch['input'].to(device) # (batch_size, seq_len)
-                target = batch['target'].to(device) # (batch_size, )
-                # mask = batch['mask'].to(device) # (1, seq_len, seq_len)
-
-                logits = model(input) # (batch_size, vocab_size)
-                loss = CE_loss(logits.view(-1, config['vocab_size']), target.view(-1))
-                loss.backward()
-
-                # Check for print condition to evaluate and print
-                if global_step % print_every == 0:
-                    summary['step'].append(global_step)
-                    val_loss , val_accuracy , val_accuracy_sample = evaluate_model(model, val_loader, device, CE_loss)
-                    # train_loss , train_accuracy = evaluate_model(model, train_loader, device, CE_loss)
-                    
-                    text = ''
-                    for key , variable in zip(['val_loss','val_accuracy','val_accuracy_sample','train_loss',],
-                                            [val_loss, val_accuracy, val_accuracy_sample,loss.item()]):
-                        text += f'{key}: {variable:.4f}  '
-                        summary[key].append(variable)
-                    
-
-                    # Print norm of trainable parameters with name
-                    text2 = ''
-                    for name, param in model.named_parameters():
-                        if param.requires_grad:
-                            param_norm = param.data.norm(2).item()
-                            text2 += f'{name}: {param_norm:.4f}  '
-                    print(f'Step {global_step}/{tot_global_steps}  ' + text + '  ' + text2)
-                
-
-                global_step += 1
-                optimizer.step()
-                optimizer.zero_grad()
     
 
     print('Training completed.')
