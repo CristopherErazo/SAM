@@ -2,7 +2,7 @@
 
 # Meta parameters
 n_prints=50 # Number of prints during training
-num_epochs=200 # Number of training epochs
+num_epochs=250 # Number of training epochs
 
 # Parameters
 vocab_size=64 # Vocabulary size
@@ -20,7 +20,7 @@ cV=1.0 # Coefficient for WV1
 gamma=0.0 # Weight decay for sgd
 alpha=1.0
 opt='SAM' # Optimizer choice = 'SGD' or 'adam' or 'SAM'
-p_error=0.15
+p_error=0.30
 # rho=0.1 # Rho parameter for SAM optimizer
 
 # Loop over various configurations = (rho)
