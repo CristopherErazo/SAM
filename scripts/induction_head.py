@@ -36,7 +36,8 @@ def main():
     parser.add_argument('--gamma',type=float,default=0.01,help='Weigth decay for sgd')
     parser.add_argument('--rho',type=float,default=0.05,help='Rho parameter for SAM optimizer')
     parser.add_argument('--opt', type=str, default='SGD', help='Type of optimizer: SGD, adam, or SAM')
-
+    parser.add_argument('--p_error', type=float, default=0.0, help='Probability of introducing noise in the target for the permutation task')
+    
     args = parser.parse_args()
     config = vars(args)
 
@@ -100,7 +101,7 @@ def main():
 
     # Save data
     fix_params = { key : config[key] for key in ['vocab_size','seq_len','lr']}
-    variable_params = { key : config[key] for key in ['alpha','cV']}
+    variable_params = { key : config[key] for key in ['alpha','cV','opt','rho','gamma','p_error']}
 
     params = {'fixed' : fix_params,
               'variable': variable_params}

@@ -22,21 +22,24 @@ def get_sample(V,L):
     # Return input.shape = (L,) and target.shape = () for compatibility with CrossEntropyLoss
     return input, target, nsteps
 
-def get_sample_permut(V,L):
+def get_sample_permut(V,L,p_error = 0.0):
     assert V >= L-1, "Vocabulary size must be greater than or equal to sequence length - 1 for permutation task."
     input = torch.randperm(V)[:L-1]
     # Get random location on the sequence 
     loc = torch.randint(0,L-3,(1,)).item()
-    input = torch.cat([input,input[loc].unsqueeze(0)],dim=0)
-    target = input[loc+1]
+    input = torch.cat([input,input[loc].unsqueeze(0)],dim=0) # shape (L,)
+    target = input[loc+1] # shape () 
+    # With probability p_error, replace target with a random token from the vocabulary (introduce noise)
+    if torch.rand(1).item() < p_error:
+        target = torch.randint(0,V,(1,))[0] # shape () 
     # Return input.shape = (L,) and target.shape = () for compatibility with CrossEntropyLoss
     return input, target, 0
 
-def generate_copying_data(num_samples:int, seq_len:int, vocab_size:int):
+def generate_copying_data(num_samples:int, seq_len:int, vocab_size:int,p_error:float=0.0) -> list[dict]:
     """Generate a dataset for the copying task."""
     data = []
     for _ in range(num_samples):
-        input , target, nsteps = get_sample_permut(vocab_size, seq_len)
+        input , target, nsteps = get_sample_permut(vocab_size, seq_len,p_error)
         data.append({
             'input' : input,
             'target' : target,
@@ -80,19 +83,22 @@ def get_dataloader(config:dict) -> tuple[DataLoader,DataLoader]:
             - seq_len (int): Length of each input sequence
             - vocab_size (int): Size of the vocabulary
             - batch_size (int): Batch size for dataloaders
+            - p_error (float): Probability of introducing noise in the target for the permutation task
     Returns:
         tuple: (train_dataloader, val_dataloader)    
     """
     n = config['dataset_size']
     L = config['seq_len']
     V = config['vocab_size']
-    dataset = generate_copying_data(n,L,V)
+    p_error = config['p_error']
 
-    # Split dataset into train and validation sets
     train_size = int(config['train_fraction'] * n)
     val_size = n - train_size
-    train_ds , val_ds = random_split(dataset,[train_size,val_size])
 
+    train_ds = generate_copying_data(train_size,L,V,p_error)
+    val_ds = generate_copying_data(val_size,L,V,p_error=0.0)
+
+  
     # Create InContextDataset instances
     train_dataset = InContextDataset(train_ds,L)
     val_dataset = InContextDataset(val_ds,L)
