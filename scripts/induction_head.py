@@ -107,7 +107,7 @@ def main():
               'variable': variable_params}
 
     # Save checkpoint of model at the beggining of training
-    file_path , _, _ = make_data_paths('model_init', experiment_name= 'small_induction_head', params=params,ext='pt') 
+    file_path , _, _ = make_data_paths('model_init', experiment_name= 'linear_attention', params=params,ext='pt') 
     print('Saving model checkpoint to ', file_path)
     torch.save(model.state_dict(), file_path)
 
@@ -137,6 +137,11 @@ def main():
                 
                 print(f'Step {global_step}/{tot_global_steps}  ' + text )
             
+            # if global_step == 23000:
+            #     print(' switch')
+            #     optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=config['lr'],weight_decay=config['gamma'])
+
+            
 
             global_step += 1
             if closure is None:
@@ -157,12 +162,12 @@ def main():
         print(f'{key} : {summary[key].shape}')
 
 
-    save_data(summary,'summary',experiment_name='small_induction_head', params=params)
+    save_data(summary,'summary',experiment_name='linear_attention', params=params)
 
     # Save checkpoint of model at the end of training
 
     # Save checkpoint of model at the beggining of training
-    file_path , _, _ = make_data_paths('model_fin', experiment_name= 'small_induction_head', params=params,ext='pt') 
+    file_path , _, _ = make_data_paths('model_fin', experiment_name= 'linear_attention', params=params,ext='pt') 
     print('Saving model checkpoint to ', file_path)
     torch.save(model.state_dict(), file_path)
     

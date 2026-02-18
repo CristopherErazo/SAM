@@ -173,12 +173,13 @@ class InductionHeadAttention(nn.Module):
 
         # Compute attention scores and attention weights with masking
         S1 = self.beta_1*torch.matmul(Q1, K1.transpose(-2, -1)) /math.sqrt(self.seq_len)  # ( seq_len, seq_len)
-        S1 = S1.masked_fill(self.mask1.to(S1.device), float('-inf'))
-        A1 = S1.softmax(dim=-1).unsqueeze(0).expand(input.size(0), -1, -1).clone()   # (batch_size, seq_len, seq_len)
+        # S1 = S1.masked_fill(self.mask1.to(S1.device), float('-inf'))
+        # A1 = S1.softmax(dim=-1).unsqueeze(0).expand(input.size(0), -1, -1).clone()   # (batch_size, seq_len, seq_len)
         # Zero the first attention weight
-        A1[:,0,:] = 0.0
+        # A1[:,0,:] = 0.0
+        A1 = S1 
         A1 = self.dropout(A1)
-        Y1 = torch.matmul(A1, V1)  # (batch_size, seq_len, vocab_size)
+        Y1 = torch.matmul(A1, V1)/math.sqrt(self.seq_len) # (batch_size, seq_len, vocab_size)
         Z1 = E + Y1  # (batch_size, seq_len, vocab_size)
 
         # SECOND LAYER
@@ -190,10 +191,11 @@ class InductionHeadAttention(nn.Module):
         # Compute attention scores and attention weights with masking
         S2 = self.beta_2*torch.matmul(q2, K2.transpose(-2, -1)) / math.sqrt(self.vocab_size) # (batch_size, 1, seq_len)
         # Mask out last position
-        S2 = S2.masked_fill(self.mask2.to(S2.device), float('-inf'))
-        A2 = S2.softmax(dim=-1)  # (batch_size, 1, seq_len)
+        # S2 = S2.masked_fill(self.mask2.to(S2.device), float('-inf'))
+        # A2 = S2.softmax(dim=-1)  # (batch_size, 1, seq_len)
+        A2 = S2
         A2 = self.dropout(A2)
-        Y2 = torch.matmul(A2, E)  # (batch_size, 1, vocab_size)
+        Y2 = torch.matmul(A2, E)/math.sqrt(self.seq_len)  # (batch_size, 1, vocab_size)
 
         # Compute logit outputs
         logits = self.beta_out * Y2  # (batch_size, 1, vocab_size)

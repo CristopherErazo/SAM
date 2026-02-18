@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Meta parameters
-n_prints=50 # Number of prints during training
-num_epochs=250 # Number of training epochs
+n_prints=500 # Number of prints during training
+num_epochs=5000 # Number of training epochs
 
 # Parameters
 vocab_size=64 # Vocabulary size
@@ -14,21 +14,34 @@ dropout=0.00 # Dropout rate
 beta_1=1.0  # Induction head beta_1 parameter
 beta_2=1.0  # Induction head beta_2 parameter
 beta_out=1.0  # Induction head beta_out parameter
-lr=0.05 # Learning rate
+lr=0.06 # Learning rate
 sigma=0.3 # Sigma for interpolation initialization
-cV=1.0 # Coefficient for WV1
+cV=1.0       # Coefficient for WV1
 gamma=0.0 # Weight decay for sgd
-alpha=1.0
+alpha=1.0 # Coefficient for interpolation 
+# rho=0.0
 opt='SAM' # Optimizer choice = 'SGD' or 'adam' or 'SAM'
-p_error=0.30
+p_error=0.3
 # rho=0.1 # Rho parameter for SAM optimizer
 
 # Loop over various configurations = (rho)
 configurations=(
     '0.0'
-    '0.05'
-    '0.1'
-    '0.15'
+    '0.25'
+    # '0.4'
+    # '0.6'
+    # '0.8'
+    # '1.0'
+    # '0.25'
+    # '0.3'
+    # '0.0'
+    # '0.05'
+    # '0.1'
+    # '0.15'
+    # '0.0'
+    # '0.2'
+    # '0.3'
+    # '0.4'
 )
 
 
