@@ -26,8 +26,8 @@ p_error=0.3
 
 # Loop over various configurations = (rho)
 configurations=(
+    '0.2'
     '0.0'
-    '0.25'
     # '0.4'
     # '0.6'
     # '0.8'

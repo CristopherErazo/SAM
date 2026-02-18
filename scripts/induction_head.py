@@ -88,6 +88,13 @@ def main():
     nprints = config['n_prints']
     print_every = max(1,tot_global_steps // nprints)
     global_step = 0
+    print_steps = np.unique(np.logspace(-0.01, np.log10(tot_global_steps), num=nprints).astype(int))
+
+    # tot_global_steps = config['num_epochs']*len(train_dataloader)
+    # nprints = config['n_prints']
+    # print_every = max(1,tot_global_steps // nprints)
+    # global_step = 0
+    # print_steps = np.unique(np.logspace(-0.01, np.log10(tot_global_steps), num=nprints).astype(int))
 
 
     # Dictionary to store process
@@ -125,7 +132,8 @@ def main():
             # loss.backward()
 
             # Check for print condition to evaluate and print
-            if global_step % print_every == 0:
+            measure_condition = global_step in print_steps
+            if measure_condition:
                 summary['step'].append(global_step)
                 val_loss , val_accuracy , target_mass = evaluate_model(model, val_loader, device, CE_loss)
 
