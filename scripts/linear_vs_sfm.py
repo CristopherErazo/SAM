@@ -8,7 +8,7 @@ import time
 # from sam.small_models import InductionHeadAttention, warm_initialization, interpolation_initialization
 from sam.small_models import noisy_initialization
 from sam.dataset import get_dataloader
-from sam.evaluation import evaluate_model
+from sam.evaluation import evaluate_model_lin_sfm
 from sam.optimizers import SAM_Optimizer
 
 from configurations import save_data , make_data_paths
@@ -31,12 +31,17 @@ def main():
     parser.add_argument('--beta_1', type=float, default=1.0, help='Induction head beta_1 parameter.')
     parser.add_argument('--beta_2', type=float, default=1.0, help='Induction head beta_2 parameter.')   
     parser.add_argument('--beta_out', type=float, default=1.0, help='Induction head beta_out parameter.')
-    parser.add_argument('--sigma', type=float, default=0.5, help='Sigma for interpolation initialization.')
+    parser.add_argument('--sigma', type=float, default=0.3, help='Sigma for interpolation initialization.')
     parser.add_argument('--cV', type=float, default=1.0, help='Coefficient for WV1.')
-    parser.add_argument('--gamma',type=float,default=0.01,help='Weigth decay for sgd')
+    parser.add_argument('--gamma',type=float,default=0.0,help='Weigth decay for sgd')
     parser.add_argument('--rho',type=float,default=0.05,help='Rho parameter for SAM optimizer')
     parser.add_argument('--opt', type=str, default='SGD', help='Type of optimizer: SGD, adam, or SAM')
     parser.add_argument('--p_error', type=float, default=0.0, help='Probability of introducing noise in the target for the permutation task')
+    parser.add_argument('--attn', type=str, default='softmax', help='Type of attention: linear or softmax')
+    parser.add_argument('--loss', type=str, default='CE', help='Type of loss function: CE or MSE')
+    parser.add_argument('--experiment_name', type=str, default='linear_attention', help='Name of the experiment for saving results')
+    parser.add_argument('--n_prints_model', type=int, default=5, help='Number of times to save model checkpoints during training.')
+    parser.add_argument('--print_scale',type=str, default='log', help='Scale for printing steps: log or linear')
     
     args = parser.parse_args()
     config = vars(args)
@@ -49,12 +54,6 @@ def main():
     model , device = noisy_initialization(config, train_list=train_list)
     print("Model created on device:", device)
 
-    # Freeze some parameters if needed
-    # list_parameters = ['beta_1', 'beta_2', 'beta_out', 
-    # 'embedding.weight', 'positions.weight', 
-    # 'WQ1.weight', 'WK1.weight', 'WV1.weight', 
-    # 'WQ2.weight', 'WK2.weight', 'WV2.weight']
-
     # Freeze all parameters except the ones on the train_list
     for name, param in model.named_parameters():
         if name not in train_list:
@@ -65,59 +64,72 @@ def main():
     train_loader , val_loader = get_dataloader(config)
 
     # Define loss function and optimizer
-    CE_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
-    # optimizer = torch.optim.Adam(model.parameters(),lr=config['lr'])
-    # optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=config['lr'])
+    if config['loss'] == 'CE':
+        CE_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
+        loss_fn = CE_loss
+    elif config['loss'] == 'MSE':
+        MSE_loss = nn.MSELoss()
+        loss_fn = MSE_loss
 
-    if config['opt'] == 'SGD':
+    
+    if config['opt'] == 'SGD' or config['rho'] == 0.0:
+        print('Using SGD optimizer with weight decay = ', config['gamma'])  
         optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=config['lr'],weight_decay=config['gamma'])
         closure = None
     elif config['opt'] == 'adam':
+        print('Using Adam optimizer')
         optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=config['lr'])
         closure = None  
     elif config['opt'] == 'SAM':
+        print('Using SAM optimizer with rho = ', config['rho'], ' and weight decay = ', config['gamma'])
         optimizer = SAM_Optimizer(filter(lambda p: p.requires_grad, model.parameters()), lr=config['lr'], q=2, rho=config['rho'])
         print('Using SAM optimizer with rho = ', config['rho'])
         def closure():
-            logits = model(input) # (batch_size, vocab_size)
-            loss = CE_loss(logits.view(-1, config['vocab_size']), target.view(-1))
+            output = model(input) # (batch_size, vocab_size)
+            if config['loss'] == 'CE':
+                loss = loss_fn(output.view(-1, config['vocab_size']), target.view(-1))
+            elif config['loss'] == 'MSE':
+                 targ_emb = model.embedding(target) # (batch_size, vocab_size)
+                 loss = loss_fn(output, targ_emb)
             return loss
 
     # Training loop parameters
     tot_global_steps = config['num_epochs']*len(train_loader)
     nprints = config['n_prints']
-    print_every = max(1,tot_global_steps // nprints)
+    nprints_model = config['n_prints_model']
     global_step = 0
-    print_steps = np.unique(np.logspace(-0.01, np.log10(tot_global_steps), num=nprints).astype(int))
-
-    # tot_global_steps = config['num_epochs']*len(train_dataloader)
-    # nprints = config['n_prints']
-    # print_every = max(1,tot_global_steps // nprints)
-    # global_step = 0
-    # print_steps = np.unique(np.logspace(-0.01, np.log10(tot_global_steps), num=nprints).astype(int))
+    if config['print_scale'] == 'log':
+        print_steps = np.unique(np.logspace(-0.01, np.log10(tot_global_steps), num=nprints).astype(int))
+        print_steps_model = np.unique(np.logspace(-0.01, np.log10(tot_global_steps), num=nprints_model).astype(int))
+    elif config['print_scale'] == 'linear':
+        print_steps = np.linspace(0, tot_global_steps-1, num=nprints).astype(int)
+        print_steps_model = np.linspace(0, tot_global_steps-1, num=nprints_model).astype(int)
 
 
     # Dictionary to store process
     summary = {
-        'step': [],
+        'model_step': [],
+        'global_step': [],
         'train_loss': [],
         'val_loss': [],
         'val_accuracy': [],
         'target_mass': []
     }
 
+
     # Save data
-    fix_params = { key : config[key] for key in ['vocab_size','seq_len','lr']}
-    variable_params = { key : config[key] for key in ['alpha','cV','opt','rho','gamma','p_error']}
+    fix_params = { key : config[key] for key in ['vocab_size','seq_len','lr','num_epochs']}
+    variable_params = { key : config[key] for key in ['alpha','cV','opt','rho','p_error','attn','loss']}
 
     params = {'fixed' : fix_params,
               'variable': variable_params}
+    
+    # save_data(summary,'summary',experiment_name=config['experiment_name'], params=params)
+    
 
-    # Save checkpoint of model at the beggining of training
-    file_path , _, _ = make_data_paths('model_init', experiment_name= 'linear_attention', params=params,ext='pt') 
-    print('Saving model checkpoint to ', file_path)
-    torch.save(model.state_dict(), file_path)
-
+    # Save train and val loaders for reproducibility
+    save_data(train_loader, 'train_loader', experiment_name=config['experiment_name'], params=params)
+    save_data(val_loader, 'val_loader', experiment_name=config['experiment_name'], params=params)
 
     print(f'\n Loss with uniform initialization = logV = {np.log(config["vocab_size"]):.4f}\n')
 
@@ -127,19 +139,20 @@ def main():
         for batch in train_loader:
             input = batch['input'].to(device) # (batch_size, seq_len)
             target = batch['target'].to(device) # (batch_size, )
-            logits = model(input) # (batch_size, vocab_size)
+            output = model(input) # (batch_size, vocab_size)
 
-            # Target embeddings 
-            targ_emb = model.embedding(target) # (batch_size, vocab_size)
-            # loss = MSE_loss(logits, targ_emb)
-            loss = CE_loss(logits.view(-1, config['vocab_size']), target.view(-1))
-            # loss.backward()
+            if config['loss'] == 'CE':
+                loss = loss_fn(output.view(-1, config['vocab_size']), target.view(-1))
+            elif config['loss'] == 'MSE':
+                 targ_emb = model.embedding(target) # (batch_size, vocab_size)
+                 loss = loss_fn(output, targ_emb)
 
-            # Check for print condition to evaluate and print
+            # Check for exaluation print condition to evaluate and print
             measure_condition = global_step in print_steps
             if measure_condition:
-                summary['step'].append(global_step)
-                val_loss , val_accuracy , target_mass = evaluate_model(model, val_loader, device, CE_loss)
+                summary['global_step'].append(global_step)
+                
+                val_loss , val_accuracy , target_mass =  evaluate_model_lin_sfm(model, val_loader, device, loss_fn,loss_type=config['loss'])
 
                 text = ''
                 for key , variable in zip(['val_loss','val_accuracy','target_mass','train_loss',],
@@ -149,11 +162,13 @@ def main():
                 
                 print(f'Step {global_step}/{tot_global_steps}  ' + text )
             
-            # if global_step == 23000:
-            #     print(' switch')
-            #     optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=config['lr'],weight_decay=config['gamma'])
+            # Check for model checkpoint print condition to save model
+            if global_step in print_steps_model:
+                summary['model_step'].append(global_step)
+                file_path , _, _ = make_data_paths(f'model_{global_step}', experiment_name= config['experiment_name'], params=params,ext='pt') 
+                print('Saving model checkpoint to ', file_path)
+                torch.save(model.state_dict(), file_path)
 
-            
 
             global_step += 1
             if closure is None:
@@ -173,16 +188,10 @@ def main():
         summary[key] = np.array(summary[key])
         print(f'{key} : {summary[key].shape}')
 
+    summary['epc_step'] = summary['global_step']/len(train_loader)
+    summary['epc_model_step'] = summary['model_step']/len(train_loader)
 
-    save_data(summary,'summary',experiment_name='linear_attention', params=params)
-
-    # Save checkpoint of model at the end of training
-
-    # Save checkpoint of model at the beggining of training
-    file_path , _, _ = make_data_paths('model_fin', experiment_name= 'linear_attention', params=params,ext='pt') 
-    print('Saving model checkpoint to ', file_path)
-    torch.save(model.state_dict(), file_path)
-    
+    save_data(summary,'summary',experiment_name=config['experiment_name'], params=params)
     
 
 if __name__ == "__main__":

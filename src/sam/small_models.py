@@ -173,13 +173,13 @@ class InductionHeadAttention(nn.Module):
 
         # Compute attention scores and attention weights with masking
         S1 = self.beta_1*torch.matmul(Q1, K1.transpose(-2, -1)) /math.sqrt(self.seq_len)  # ( seq_len, seq_len)
-        # S1 = S1.masked_fill(self.mask1.to(S1.device), float('-inf'))
-        # A1 = S1.softmax(dim=-1).unsqueeze(0).expand(input.size(0), -1, -1).clone()   # (batch_size, seq_len, seq_len)
+        S1 = S1.masked_fill(self.mask1.to(S1.device), float('-inf'))
+        A1 = S1.softmax(dim=-1).unsqueeze(0).expand(input.size(0), -1, -1).clone()   # (batch_size, seq_len, seq_len)
         # Zero the first attention weight
-        # A1[:,0,:] = 0.0
-        A1 = S1 
+        A1[:,0,:] = 0.0
+        # A1 = S1 /math.sqrt(self.seq_len)
         A1 = self.dropout(A1)
-        Y1 = torch.matmul(A1, V1)/math.sqrt(self.seq_len) # (batch_size, seq_len, vocab_size)
+        Y1 = torch.matmul(A1, V1) # (batch_size, seq_len, vocab_size)
         Z1 = E + Y1  # (batch_size, seq_len, vocab_size)
 
         # SECOND LAYER
@@ -191,17 +191,111 @@ class InductionHeadAttention(nn.Module):
         # Compute attention scores and attention weights with masking
         S2 = self.beta_2*torch.matmul(q2, K2.transpose(-2, -1)) / math.sqrt(self.vocab_size) # (batch_size, 1, seq_len)
         # Mask out last position
-        # S2 = S2.masked_fill(self.mask2.to(S2.device), float('-inf'))
-        # A2 = S2.softmax(dim=-1)  # (batch_size, 1, seq_len)
-        A2 = S2
+        S2 = S2.masked_fill(self.mask2.to(S2.device), float('-inf'))
+        A2 = S2.softmax(dim=-1)  # (batch_size, 1, seq_len)
+        # A2 = S2/math.sqrt(self.seq_len) 
         A2 = self.dropout(A2)
-        Y2 = torch.matmul(A2, E)/math.sqrt(self.seq_len)  # (batch_size, 1, vocab_size)
+        Y2 = torch.matmul(A2, E) # (batch_size, 1, vocab_size)
 
         # Compute logit outputs
         logits = self.beta_out * Y2  # (batch_size, 1, vocab_size)
 
         # Return logits at last position only
         return  logits[:,0,:]  # (batch_size, vocab_size)
+
+
+class Lin_Sfm_Attention(nn.Module):
+    def __init__(
+            self,
+            vocab_size: int,
+            seq_len: int,
+            dropout: float = 0.0,
+            attn: str = 'softmax'
+            ) -> None:
+        super().__init__()
+
+        self.seq_len = seq_len
+        self.vocab_size = vocab_size
+        self.d_model = vocab_size + seq_len
+        self.d_eff = self.seq_len
+        self.attn = attn
+        self.mask1 = torch.tril(torch.ones((seq_len,seq_len)),diagonal=0) == 0
+        self.mask2 = torch.tensor([[[False]*(self.seq_len-2) + [True,True]]])
+        if attn not in ['softmax', 'linear']:
+            raise ValueError("Invalid attention type")
+        # Embeddings
+        self.embedding = nn.Embedding(vocab_size, vocab_size)
+        self.positions = nn.Embedding(seq_len,seq_len)
+
+        # First layer weights
+        self.WQ1 = nn.Linear(self.seq_len, self.seq_len, bias=False)
+        self.WK1 = nn.Linear(self.seq_len, self.seq_len, bias=False)
+        self.WV1 = nn.Linear(self.vocab_size, self.vocab_size, bias=False)
+
+        # Second layer weights
+        self.WQ2 = nn.Linear(self.vocab_size, self.vocab_size, bias=False)
+        self.WK2 = nn.Linear(self.vocab_size, self.vocab_size, bias=False)
+
+        # Dropout
+        self.dropout=nn.Dropout(dropout)
+
+        # Scalar Parameters
+        self.beta_1 = nn.Parameter(torch.tensor(1.0))
+        self.beta_2 = nn.Parameter(torch.tensor(1.0))
+        self.beta_out = nn.Parameter(torch.tensor(1.0))
+
+
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """ X: (batch_size, seq_len) list of token ids """
+
+        # Input embedding + positional encoding
+        E = self.embedding(input)  # (batch_size, seq_len, vocab_size)
+        P = self.positions(torch.arange(self.seq_len, device=input.device)) # (seq_len, seq_len)
+
+        # FIRST LAYER
+        # Compute queries and keys
+        Q1 = self.WQ1(P)  # ( seq_len, seq_len)
+        K1 = self.WK1(P)  # ( seq_len, seq_len)
+        V1 = self.WV1(E)  # (batch_size, seq_len, vocab_size)
+
+        # Compute attention scores and attention weights with masking
+        S1 = self.beta_1*torch.matmul(Q1, K1.transpose(-2, -1)) /math.sqrt(self.seq_len)  # ( seq_len, seq_len)
+        if self.attn == 'softmax':
+            S1 = S1.masked_fill(self.mask1.to(S1.device), float('-inf'))
+            A1 = S1.softmax(dim=-1).unsqueeze(0).expand(input.size(0), -1, -1).clone()   # (batch_size, seq_len, seq_len)
+            # Zero the first attention weight
+            A1[:,0,:] = 0.0
+        elif self.attn == 'linear':
+            A1 = S1 /math.sqrt(self.seq_len)
+          
+        A1 = self.dropout(A1)
+        Y1 = torch.matmul(A1, V1) # (batch_size, seq_len, vocab_size)
+        Z1 = E + Y1  # (batch_size, seq_len, vocab_size)
+
+        # SECOND LAYER
+        # Compute queries and keys
+        q2 = self.WQ2(Z1[:,-1]).unsqueeze(1)  # (batch_size, 1 , vocab_size)
+        K2 = self.WK2(Z1)  # (batch_size, seq_len, vocab_size)
+        
+
+        # Compute attention scores and attention weights with masking
+        S2 = self.beta_2*torch.matmul(q2, K2.transpose(-2, -1)) / math.sqrt(self.vocab_size) # (batch_size, 1, seq_len)
+        if self.attn == 'softmax':
+            # Mask out last position
+            S2 = S2.masked_fill(self.mask2.to(S2.device), float('-inf'))
+            A2 = S2.softmax(dim=-1)  # (batch_size, 1, seq_len)
+        elif self.attn == 'linear':
+            A2 = S2/math.sqrt(self.seq_len) 
+             
+        A2 = self.dropout(A2)
+        Y2 = torch.matmul(A2, E) # (batch_size, 1, vocab_size)
+
+        # Compute logit outputs
+        output = self.beta_out * Y2  # (batch_size, 1, vocab_size)
+
+        # Return logits at last position only
+        return  output[:,0,:]  # (batch_size, vocab_size)
 
 def warm_initialization(model: InductionHeadAttention, alpha:float = 0.0 ,betas:tuple = (1.0,1.0,1.0), sigma:float = 0.5) -> None:
 
@@ -259,7 +353,7 @@ def warm_initialization(model: InductionHeadAttention, alpha:float = 0.0 ,betas:
 
 
 
-def planted_initialization(model: InductionHeadAttention, betas:tuple = (1.0,1.0,1.0), cV:float = 1.0) -> None:
+def planted_initialization(model, betas:tuple = (1.0,1.0,1.0), cV:float = 1.0) -> None:
     V = model.vocab_size
     L = model.seq_len
     beta_1, beta_2, beta_out = betas
@@ -288,7 +382,7 @@ def planted_initialization(model: InductionHeadAttention, betas:tuple = (1.0,1.0
         model.beta_out.data.copy_(torch.tensor(beta_out))
 
 
-def random_initialization(model: InductionHeadAttention, betas:tuple = (1.0,1.0,1.0), sigma:float = 0.5, cV:float = 1.0) -> None:
+def random_initialization(model, betas:tuple = (1.0,1.0,1.0), sigma:float = 0.5, cV:float = 1.0) -> None:
     V = model.vocab_size
     L = model.seq_len
     beta_1, beta_2, beta_out = betas
@@ -334,6 +428,8 @@ def noisy_initialization(config,train_list=None) -> None:
         - beta_out (float): Induction head beta_out parameter.
         - sigma (float): Sigma for random initialization.
         - cV (float): Scaling factor for V matrices in planted and random initialization.
+        - attn (str): Type of attention: 'softmax' or 'linear'.
+    train_list (list, optional): List of parameter names to apply interpolation initialization. If None, interpolation is applied to all parameters. Default is None.
 
     Returns:
     --------
@@ -345,10 +441,10 @@ def noisy_initialization(config,train_list=None) -> None:
     device = torch.device(device)
 
     # Initialize model with planted parameters
-    planted_model = InductionHeadAttention(vocab_size=config['vocab_size'], seq_len=config['seq_len'], dropout=config['dropout']).to(device)
+    planted_model = Lin_Sfm_Attention(vocab_size=config['vocab_size'], seq_len=config['seq_len'], dropout=config['dropout'],attn=config['attn']).to(device)
     planted_initialization(planted_model,betas=(config['beta_1'], config['beta_2'], config['beta_out']), cV=config['cV'])
     # Initialize model with random parameters
-    random_model = InductionHeadAttention(vocab_size=config['vocab_size'], seq_len=config['seq_len'], dropout=config['dropout']).to(device)
+    random_model = Lin_Sfm_Attention(vocab_size=config['vocab_size'], seq_len=config['seq_len'], dropout=config['dropout'],attn=config['attn']).to(device)
     random_initialization(random_model,betas=(config['beta_1'], config['beta_2'], config['beta_out']), sigma=config['sigma'], cV=config['cV'])
 
     # Interpolate between planted and random parameters just for the parameters in train_list
