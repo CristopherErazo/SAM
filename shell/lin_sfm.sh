@@ -22,24 +22,24 @@ print_scale='log' # Scale for printing steps: log or linear
 num_epochs=200 # Number of training epochs
 
 # Variable Parameters
-lr=0.3 # Learning rate
+lr=0.1 # Learning rate
 cV=1.1     # Coefficient for WV1  
 alpha=0.5 # Coefficient for interpolation 
 opt='SAM' # Optimizer choice = 'SGD' or 'adam' or 'SAM'
 p_error=0.0 # Probability of introducing noise in the target for the induction task
 rho=0.0 # Rho parameter for SAM optimizer
-attn='softmax' # Type of attention: linear or softmax
+attn='linear' # Type of attention: linear or softmax
 loss='CE' # Type of loss function: CE or MSE
-experiment_name='opt_sfm' # Name of the experiment for saving results
+experiment_name='opt_lin_CE' # Name of the experiment for saving results
 
 
 # Loop over various configurations = (rho)
 configurations=(
-    '0.0'
-    '0.1'
-    '0.2'
-    '0.3'
-    # '0.4'
+    # '0.0'
+    # '0.1'
+    # '0.2'
+    # '0.3'
+    '0.4'
 )
 
 
