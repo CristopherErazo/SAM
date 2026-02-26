@@ -42,13 +42,18 @@ def main():
     parser.add_argument('--experiment_name', type=str, default='linear_attention', help='Name of the experiment for saving results')
     parser.add_argument('--n_prints_model', type=int, default=5, help='Number of times to save model checkpoints during training.')
     parser.add_argument('--print_scale',type=str, default='log', help='Scale for printing steps: log or linear')
-    
+    parser.add_argument('--save_data', type=str, default='False', help='Whether to save training data and model checkpoints')
+
+
     args = parser.parse_args()
     config = vars(args)
 
     print("Configuration:")
     print(config)
 
+    for key in ['save_data']:
+        config[key] = config[key].lower() == 'true'
+        
     # Create model and move to device
     train_list = ['WQ1.weight', 'WK1.weight','WV1.weight','WQ2.weight', 'WK2.weight']
     model , device = noisy_initialization(config, train_list=train_list)
@@ -99,8 +104,8 @@ def main():
     nprints_model = config['n_prints_model']
     global_step = 0
     if config['print_scale'] == 'log':
-        print_steps = np.unique(np.logspace(-0.01, np.log10(tot_global_steps), num=nprints).astype(int))
-        print_steps_model = np.unique(np.logspace(-0.01, np.log10(tot_global_steps), num=nprints_model).astype(int))
+        print_steps = np.unique(np.logspace(-0.01, np.log10(tot_global_steps-1), num=nprints).astype(int))
+        print_steps_model = np.unique(np.logspace(-0.01, np.log10(tot_global_steps-1), num=nprints_model).astype(int))
     elif config['print_scale'] == 'linear':
         print_steps = np.linspace(0, tot_global_steps-1, num=nprints).astype(int)
         print_steps_model = np.linspace(0, tot_global_steps-1, num=nprints_model).astype(int)
@@ -128,8 +133,9 @@ def main():
     
 
     # Save train and val loaders for reproducibility
-    save_data(train_loader, 'train_loader', experiment_name=config['experiment_name'], params=params)
-    save_data(val_loader, 'val_loader', experiment_name=config['experiment_name'], params=params)
+    if config['save_data']:
+        save_data(train_loader, 'train_loader', experiment_name=config['experiment_name'], params=params)
+        save_data(val_loader, 'val_loader', experiment_name=config['experiment_name'], params=params)
 
     print(f'\n Loss with uniform initialization = logV = {np.log(config["vocab_size"]):.4f}\n')
 
