@@ -2,6 +2,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 import numpy as np
+import math
 
 from sam.models import init_teacher_student
 from sam.optimizers import SAM_Optimizer
@@ -26,10 +27,15 @@ def main():
     parser.add_argument('--rho', type=float, default=0.1, help='Radius for SAM')
     parser.add_argument('--nprints', type=int, default=20, help='Number of prints during training')
     parser.add_argument('--n_steps', type=int, default=1000, help='Number of training steps - each step is a batch')
+    parser.add_argument('--k', type=float, default=1.0, help='Information Exponent')
 
     args = parser.parse_args()
     config = vars(args)
 
+    config['lr'] = config['lr'] * config['d']**(-config['k']/2)
+    config['n_steps'] = int(config['n_steps'] * config['d']**(config['k']-1))
+
+    print(f'lr = {config["lr"]}, n_steps = {config["n_steps"]}')
     print("Configuration:")
     print(config)
 
@@ -92,26 +98,29 @@ def main():
             optimizer.step()
         else:
             optimizer.step(closure)
+
+        # Normalize teacher weights at each step
+        student.W.weight.data = student.W.weight.data / torch.norm(student.W.weight.data)
         
  
         print_condition = (step % print_every == 0) or (step == n_steps - 1)
         if print_condition:
             # Compute generalization error
             with torch.no_grad():
-                y_test_pred = student(x_test)
-                test_loss = F.mse_loss(y_test, y_test_pred)
+                # y_test_pred = student(x_test)
+                # test_loss = F.mse_loss(y_test, y_test_pred)
                 # Compute overlap and norm
                 w_student = torch.cat([p.view(-1) for p in student.parameters()])
-                norm2 = torch.dot(w_student,w_student) / config['d']
-                overlap = torch.dot(w_teacher, w_student)   / config['d']
+                norm2 = torch.dot(w_student,w_student) #/ config['d']
+                overlap = torch.dot(w_teacher, w_student)   #/ config['d']
                 
             # Save to summary
             summary['step'].append(step)
             summary['train_loss'].append(loss.item())
-            summary['test_loss'].append(test_loss.item())
+            # summary['test_loss'].append(test_loss.item())
             summary['overlap'].append(overlap.item())
             summary['norm2'].append(norm2.item())
-            print(f'Step {step+1}/{n_steps}, Test Loss: {test_loss.item():.4f}, Overlap: {overlap.item():.4f}, Norm Student: {norm2.item():.4f}')
+            print(f'Step {step+1}/{n_steps}, Loss: {loss.item():.4f}, Overlap: {overlap.item():.4f}, Norm Student: {norm2.item():.4f}')
 
 
     for key in summary.keys():

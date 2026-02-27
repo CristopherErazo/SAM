@@ -27,7 +27,7 @@ class SingleIndex(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, 1).
         """
-        return self.activation(self.W(x)/ math.sqrt(self.d))
+        return self.activation(self.W(x))#/ math.sqrt(self.d))
     
 def init_teacher_student(d : int=10, teacher_act = 'He3', student_act = 'relu', device="cpu"):
     """Teacher is frozen; student is trainable."""
@@ -38,8 +38,11 @@ def init_teacher_student(d : int=10, teacher_act = 'He3', student_act = 'relu', 
         teacher.W.weight.normal_(0, 1)
         student.W.weight.normal_(0, 1)
         # Normalize both teacher and student weights
-        teacher.W.weight /= torch.norm(teacher.W.weight)/math.sqrt(d)
-        student.W.weight /= torch.norm(student.W.weight)/math.sqrt(d)
+        teacher.W.weight /= torch.norm(teacher.W.weight)#/math.sqrt(d)
+        student.W.weight /= torch.norm(student.W.weight)#/math.sqrt(d)
+        # make student and teacher orthogonal at initialization
+        student.W.weight.copy_( student.W.weight - (torch.dot(student.W.weight.view(-1), teacher.W.weight.view(-1)) / torch.norm(teacher.W.weight)**2) * teacher.W.weight )
+        student.W.weight /= torch.norm(student.W.weight)
 
     for p in teacher.parameters():
         p.requires_grad_(False)
