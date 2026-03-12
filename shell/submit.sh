@@ -1,6 +1,6 @@
 #!/bin/bash
 
-jobs=4
+jobs=6
 # Parameters
 d=50                # Input dimension
 tch_act='He4'        # Activation function for teacher
@@ -10,7 +10,7 @@ bs=1                # Batch size for training
 lr=0.05                   # Learning rate
 eps=0.0               # Noise level for labels
 q=2.0                 # q-norm for SAM
-nprints=30            # Number of prints during training
+nprints=50            # Number of prints during training
 nsteps=10
 k=4.0                 # Information exponent
 gamma=0.0             # Momentum for optimizers
@@ -20,6 +20,8 @@ gamma=0.0             # Momentum for optimizers
 configurations=(
     # 'SAM 0.0 0.01'
     # 'SAM 0.0 0.001'
+    'SGD 0.0'
+    'SAM 0.00001'
     'SAM 0.0001'
     'SAM 0.001'
     'SAM 0.01'
@@ -31,7 +33,7 @@ run_config() {
     local opt="$1"
     local rho="$2"
     local log_file
-    log_file="logs/${opt}_${rho}.log"
+    log_file="logs/${opt}_${rho}_1.log"
 
     echo "Logging to ${log_file}"
 
