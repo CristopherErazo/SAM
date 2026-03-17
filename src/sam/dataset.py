@@ -49,15 +49,16 @@ def generate_copying_data(num_samples:int, seq_len:int, vocab_size:int,p_error:f
 
 
 
-def get_sample_dual_task(L:int,P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,trigger_set:list):
+def get_sample_dual_task(L:int, K: int ,P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor):
     """
     Generate a single sample for the dual task.
     Args:
+        K (int): Number of trigger tokens in the sequence
         L (int): Sequence length
         P_b (torch.tensor): Bigram probability matrix of shape (V,V) P_b[i,j]  = P(token j | token i)
         P_u (torch.tensor): Unigram probability vector of shape (V,) P_u[i] = P(token i)
         P_o (torch.tensor): Probability for output tokens of a trigger token, shape (V,V) P_o[i,j] = P(output token j | trigger token i)
-        trigger_set (list): Set of trigger tokens for the dual task
+        P_t (torch.tensor): Probability for trigger tokens, shape (V,) P_t[i] = P(trigger token i)
         
     Returns:
         input (torch.tensor): Input sequence of shape (L,)
@@ -70,15 +71,22 @@ def get_sample_dual_task(L:int,P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tenso
     - If the previour token is a trigger token, the next token is deterministically the output token corresponding to that trigger token.
     - If the previous token is not a trigger token, the next token is sampled from P_b depending on the previous token.
     """
-
+    # Sample K trigger tokens from P_t without replacement
+    trigger_set = torch.multinomial(P_t, num_samples=K, replacement=False).tolist()
     # Sample an output token for each trigger token in the sequence according to P_o
     output_set = [ torch.multinomial(P_o[trigger_token], num_samples=1).item() for trigger_token in trigger_set]
     # print("Output set for trigger tokens: ", output_set)
     sequence = torch.zeros(L+1, dtype=torch.long)
     # Sample the first token from P_u
     sequence[0] = torch.multinomial(P_u, num_samples=1).item()
+
+    cnts = {} # dictionary to count occurrences of each token in the sequence, initialized with the first token
+    counts = []
+
     for i in range(1,L):
         prev_token = sequence[i-1].item()
+        cnts[prev_token] = cnts.get(prev_token,0) + 1
+        counts.append(cnts[prev_token])
         if prev_token in trigger_set:
             # If the previous token is a trigger token, the next token is deterministically the output token corresponding to that trigger token
             trigger_index = trigger_set.index(prev_token)
@@ -87,22 +95,48 @@ def get_sample_dual_task(L:int,P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tenso
             # If the previous token is not a trigger token, the next token is sampled from P_b depending on the previous token
             sequence[i] = torch.multinomial(P_b[prev_token], num_samples=1).item()
 
-    input = sequence[:-1] # shape (L,)
-    target = sequence[1:] # shape (L,) target is the next token for each position in the input sequence
-    return input, target , output_set
+    prev_token = sequence[L].item()
+    cnts[prev_token] = cnts.get(prev_token,0) + 1
+    counts.append(cnts[prev_token])
+    return sequence , torch.tensor(trigger_set) , torch.tensor(output_set) , torch.tensor(counts)
 
 
-def generate_dual_task_data(num_samples:int, seq_len:int,P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,trigger_set:list) -> list[dict]:
+def generate_dual_task_data(num_samples:int, seq_len:int,K:int, P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor) -> list[dict]:
     """Generate a dataset for the copying task."""
     data = []
     for _ in range(num_samples):
-        input , target  , output_set = get_sample_dual_task(seq_len,P_b,P_u,P_o,trigger_set)
+        sequence , trigger_set  , output_set , counts = get_sample_dual_task(seq_len,K,P_b,P_u,P_o,P_t)
         data.append({
-            'input' : input,
-            'target' : target,
-            'output_set' : output_set
+            'sequence' : sequence,
+            'trigger_set' : trigger_set,
+            'output_set' : output_set,
+            'counts' : counts
         })
     return data
+
+def generate_dual_task_batch(batch_size:int, seq_len:int,K:int, P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor) -> dict[str, torch.Tensor]:
+    """Generate a batch of data for the dual task."""
+    sequences = []
+    trigger_sets = []
+    output_sets = []
+    counts_list = []
+    for _ in range(batch_size):
+        sequence , trigger_set  , output_set , counts = get_sample_dual_task(seq_len,K,P_b,P_u,P_o,P_t)
+        sequences.append(sequence)
+        trigger_sets.append(trigger_set)
+        output_sets.append(output_set)
+        counts_list.append(counts)
+    
+    mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool)) # (1, L, L) for multi-head attention
+    batch_mask = mask.unsqueeze(0).expand(batch_size, -1, -1) # (batch_size, seq_len, seq_len)
+    return {
+        'sequence' : torch.stack(sequences), # shape (batch_size, seq_len)
+        'trigger_set' : torch.stack(trigger_sets), # shape (batch_size, K)
+        'output_set' : torch.stack(output_sets), # shape (batch_size, K)
+        'counts' : torch.stack(counts_list), # shape (batch_size, seq_len)
+        'mask' : batch_mask # shape (batch_size, seq_len, seq_len)
+
+    }
 
 
 def get_distributions(vocab_size:int,mode:str='uniform',beta:float=1.0) -> tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
@@ -161,9 +195,10 @@ class InContextDataset(Dataset):
         # causal mask: lower triangular (allow attend to <= position)
         mask = torch.tril(torch.ones((self.L, self.L), dtype=torch.bool)) # (1, L, L) for multi-head attention
         return {
-            "input": item['input'],
-            "target": item['target'],
+            "sequence": item['sequence'],
+            "trigger_set": item['trigger_set'],
             "output_set": item['output_set'],
+            "counts": item['counts'],
             "mask": mask
         }
 

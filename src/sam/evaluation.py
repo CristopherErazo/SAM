@@ -85,3 +85,61 @@ def evaluate_overlap_with_teacher(model:torch.nn.Module, teacher_model:torch.nn.
             square_distance = torch.sum((param_flat - teacher_param_flat) ** 2).item()
             overlaps[name] = [cosine_similarity,square_distance]
     return overlaps    
+
+
+def evaluate_induction_bigram(model,batch,loss_fn):
+    model.eval()
+    device = next(model.parameters()).device
+    with torch.no_grad():
+        sequence = batch['sequence'].to(device) # shape (batch_size, seq_len + 1)
+        input = sequence[:, :-1] # shape (batch_size, seq_len)
+        target = sequence[:, 1:] # shape (batch_size, seq_len)
+        counts = batch['counts'].to(device) # shape (batch_size, seq_len)
+        mask = batch['mask'].to(device) # shape (batch_size, seq_len, seq_len)
+        trigger_set = batch['trigger_set'].to(device) # shape (batch_size, K)
+        
+        # Case 1: evaluate only attention mechanism which should perform induction head
+
+        # Evaluate Model
+        logits = model(input, mask, attn=True, fc=False) # shape (batch_size, seq_len, vocab_size)
+
+        # mask outputs only when counts >=2 and input token is in trigger set of correponding example in batch
+        #   ( (B,L)->(B,L,1) -- (B,K) -> (B,1,K) ) --> (B,L,K) -any-> (B,L)  & (B,L) ==>> (B,L) 
+        # valid = (input.unsqueeze(-1) == trigger_set.unsqueeze(1)).any(-1) & (counts >= 2) # for only triggers
+        valid = (counts >= 2) # for all tokens with counts >=2
+        
+        # Extract logits and targets at masked positions
+        masked_logits = logits[valid] # shape (num_masked_positions, vocab_size)
+        predictions = masked_logits.argmax(dim=-1) # shape (num_masked_positions)
+        masked_targets = target[valid] # shape (num_masked_positions)
+        loss_ind = loss_fn(masked_logits, masked_targets) 
+        # accuracy = (predictions == masked_targets).float().mean().item()
+
+        # Case 2: evaluate only linear layer which should perform bigram statistics
+        logits = model(input, mask, attn=False, fc=True) # shape (batch_size, seq_len, vocab_size)
+
+        # Mask out the trigger tokens
+        # valid = ~(input.unsqueeze(-1) == trigger_set.unsqueeze(1)).any(-1) # shape (batch_size, seq_len) # only non-triggers
+       
+        valid = torch.ones_like(input, dtype=torch.bool) # Valid for all positions
+        valid[:,0] = False # mask out the first position since it has no bigram context
+
+        masked_logits = logits[valid] # shape (num_masked_positions, vocab_size)
+        masked_targets = target[valid] # shape (num_masked_positions)
+        loss_bi = loss_fn(masked_logits, masked_targets)
+
+         # Case 3: evaluate both
+        logits = model(input, mask, attn=True, fc=True) # shape (batch_size, seq_len, vocab_size)
+
+        # Mask out the trigger tokens
+        # valid = ~(input.unsqueeze(-1) == trigger_set.unsqueeze(1)).any(-1) # shape (batch_size, seq_len) # only non-triggers
+       
+        valid = torch.ones_like(input, dtype=torch.bool) # Valid for all positions
+        valid[:,0] = False # mask out the first position since it has no bigram context
+
+        masked_logits = logits[valid] # shape (num_masked_positions, vocab_size)
+        masked_targets = target[valid] # shape (num_masked_positions)
+        loss_tot = loss_fn(masked_logits, masked_targets)
+
+    return loss_bi.item(), loss_ind.item() , loss_tot.item()
+

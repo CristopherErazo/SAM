@@ -5,20 +5,18 @@ import math
 class DualModel(nn.Module):
     def __init__(
             self,
-            d_model: int,
-            vocab_size: int,
-            seq_len: int,
-            dropout: float = 0.0,
+            config: dict,
             ) -> None:
         super().__init__()
 
-        self.seq_len = seq_len
-        self.vocab_size = vocab_size
-        self.d_model = d_model
+        self.seq_len = config['seq_len']
+        self.vocab_size = config['vocab_size']
+        self.d_model = config['d_model']
+        self.drop = config['dropout']
 
         # Embeddings
-        self.E = nn.Embedding(vocab_size, d_model)
-        self.P = nn.Embedding(seq_len,d_model)
+        self.E = nn.Embedding(self.vocab_size, self.d_model)
+        self.P = nn.Embedding(self.seq_len,self.d_model)
         
         # First attention
         self.WQK1 = nn.Linear(self.d_model, self.d_model, bias=False)
@@ -32,13 +30,14 @@ class DualModel(nn.Module):
         self.WF = nn.Linear(self.d_model, self.d_model, bias=False)
 
         # Unembedding
-        self.U = nn.Linear(self.d_model, vocab_size, bias=False)
+        self.U = nn.Linear(self.d_model, self.vocab_size, bias=False)
 
         # Dropout
-        self.dropout=nn.Dropout(dropout)
+        self.dropout=nn.Dropout(self.drop)
 
         # Extras
         self.positions = torch.arange(self.seq_len)
+        self.gamma = nn.Parameter(torch.tensor(4.0))
 
     def full_output(self, input: torch.Tensor,mask:torch.Tensor) -> torch.Tensor:
         """ X: (batch_size, seq_len) list of token ids """
@@ -92,38 +91,40 @@ class DualModel(nn.Module):
         return output
     
 
-    def forward(self, input: torch.Tensor,mask:torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor,mask:torch.Tensor,attn:bool=True,fc:bool=True) -> torch.Tensor:
         """ X: (batch_size, seq_len) list of token ids """
 
         # Input embedding + positional encoding
-        X0 = self.E(input) + self.P(self.positions.to(input.device))  # (batch_size, seq_len, d_model)
-       
-        # FIRST LAYER
-        S1 = self.WQK1(X0)  @ X0.transpose(-2, -1) * math.sqrt(self.d_model)  # (batch_size, seq_len, seq_len)
-        S1 = S1.masked_fill(~mask, float('-inf'))
-        A1 = S1.softmax(dim=-1)  # (batch_size, seq_len, seq_len)
-        A1 = self.dropout(A1)        
-        Y1 = A1 @ self.W0V1(X0)  # (batch_size, seq_len, d_model)
-        X1 = X0 + Y1  # ( batch_size, seq_len, d_model)
+        X = self.E(input) + self.P(self.positions.to(input.device))  # (batch_size, seq_len, d_model)
 
-        # SECOND LAYER
-        S2 = self.WQK2(X1) @ X1.transpose(-2, -1) * math.sqrt(self.d_model)   # (batch_size, seq_len, seq_len)
-        S2 = S2.masked_fill(~mask, float('-inf'))
-        A2 = S2.softmax(dim=-1)  # (batch_size, seq_len, seq_len)   
-        A2 = self.dropout(A2)
-        Y2 = A2 @ self.W0V2(X1) * 3  # (batch_size, seq_len, d_model)
-        X2 = X1 + Y2  # ( batch_size, seq_len, d_model)
+        if attn:
+            # FIRST LAYER
+            S = self.WQK1(X)  @ X.transpose(-2, -1) * math.sqrt(self.d_model)  # (batch_size, seq_len, seq_len)
+            S = S.masked_fill(~mask, float('-inf'))
+            A = S.softmax(dim=-1)  # (batch_size, seq_len, seq_len)
+            A = self.dropout(A)        
+            Y = A @ self.W0V1(X)  # (batch_size, seq_len, d_model)
+            X = X + Y  # ( batch_size, seq_len, d_model)
 
-        # Linear layer
-        Y3 = self.WF(X2)  # (batch_size, seq_len, d_model)
-        X3 = X2 + Y3  # (batch_size, seq_len, d_model)
+            # SECOND LAYER
+            S = self.WQK2(X) @ X.transpose(-2, -1) * math.sqrt(self.d_model)   # (batch_size, seq_len, seq_len)
+            S = S.masked_fill(~mask, float('-inf'))
+            A = S.softmax(dim=-1)  # (batch_size, seq_len, seq_len)   
+            A = self.dropout(A)
+            Y = A @ self.W0V2(X) * self.gamma # (batch_size, seq_len, d_model)
+            X = X + Y  # ( batch_size, seq_len, d_model)
+
+        if fc:
+            # Linear layer
+            Y = self.WF(X)  # (batch_size, seq_len, d_model)
+            X = X + Y  # (batch_size, seq_len, d_model)
 
         # Unembedding
-        logits = self.U(X3)  # (batch_size, seq_len, vocab_size)
+        logits = self.U(X)  # (batch_size, seq_len, vocab_size)
         return logits
 
 
-def initialize_dual_model(model , P_b, trigger_set):
+def initialize_dual_model(model , P_b):
     with torch.no_grad():
         # Initialize E , U ~ N(0, 1/sqrt(d_model)) and freeze them
         model.E.weight.copy_(torch.randn_like(model.E.weight) / math.sqrt(model.d_model))
@@ -146,7 +147,7 @@ def initialize_dual_model(model , P_b, trigger_set):
 
         # Initialize WQK2 as sum_t E[t] * (W0V1 @ E[t])^T where E is the token embedding matrix and W0V1 is the value projection of the first attention and t in trigger_set
         WQK2_init = torch.zeros_like(model.WQK2.weight)
-        for t in trigger_set:
+        for t in range(model.vocab_size):
             WQK2_init += torch.outer(model.E.weight[t], model.E.weight[t])
         model.WQK2.weight.copy_( ( model.W0V1.weight @ WQK2_init))
 
