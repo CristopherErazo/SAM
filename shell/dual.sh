@@ -18,7 +18,8 @@ alpha=2.0 # exponent for zipf distribution
 n_prints=100 # Number of prints during training
 n_prints_model=5 # Number of times to save model checkpoints during training.
 print_scale='log' # Scale for printing steps: log or linear
-steps=20 # Number of training epochs
+steps=25 # Number of training epochs
+fix_trig='False' # Whether to fix the trigger tokens across all experiments. If False, trigger tokens will be randomly sampled at each sequence
 
 # Variable Parameters
 lr=0.05 # Learning rate
@@ -27,7 +28,7 @@ experiment_name='tmp' # Name of the experiment for saving results
 
 # Loop over various configurations 
 configurations=(
-    '42 256' 
+    '32 256' 
 )
 
 
@@ -54,7 +55,8 @@ run_config() {
             --K $K \
             --alpha $alpha \
             --d_model $d_model \
-            --steps $steps
+            --steps $steps \
+            --fix_trig $fix_trig
 
 
         echo "Completed: at $(date)"
@@ -68,7 +70,7 @@ run_config() {
 }
 
 export -f run_config
-export vocab_size seq_len batch_size steps alpha
+export vocab_size seq_len batch_size steps alpha fix_trig
 export n_prints n_prints_model print_scale lr experiment_name K mode d_model
 
 parallel -j "${jobs}" --colsep ' ' run_config {1} {2} ::: "${configurations[@]}"

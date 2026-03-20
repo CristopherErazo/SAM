@@ -32,6 +32,7 @@ def main():
     parser.add_argument('--print_scale',type=str, default='log', help='Scale for printing steps: log or linear')
     parser.add_argument('--mode', type=str, default='uniform', help='Data distribution mode: uniform or random')
     parser.add_argument('--alpha', type=float, default=1.0, help='Exponent for the unigram distribution (Zipf\'s law)')
+    parser.add_argument('--fix_trig',type=str,default='True', help='Whether to fix the trigger tokens across all experiments. If False, trigger tokens will be randomly sampled at each sequence')
 
     args = parser.parse_args()
     config = vars(args)
@@ -39,12 +40,16 @@ def main():
     print("Configuration:")
     print(config)
 
+    for key in ['fix_trig']:
+        config[key] = config[key].lower() == 'true' # Convert string to boolean
+
  
     # Define the distributions for the dual task    
     # P_b, P_u, P_o, P_t = get_distributions(config['vocab_size'], config['mode'], beta=2.0)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    P_t = torch.ones(config['vocab_size']) / config['vocab_size'] # Uniform distribution over triggers
-    P_o = torch.ones((config['vocab_size'],config['vocab_size'])) / (config['vocab_size']-1) # Uniform distribution over outputs given triggers apart from the trigger token itself
+    P_t = torch.ones(config['vocab_size']).to(device) / config['vocab_size'] # Uniform distribution over triggers
+    P_o = torch.ones((config['vocab_size'],config['vocab_size'])).to(device) / (config['vocab_size']-1) # Uniform distribution over outputs given triggers apart from the trigger token itself
     P_o.fill_diagonal_(0) # Set diagonal to 0 since output cannot be
 
     # Unigram distribution follows zipf's law with exponent alpha    
@@ -53,12 +58,14 @@ def main():
     P_u /= P_u.sum() # Normalize to get a valid probability distribution
 
     # Bigram distribution is the same as unigram for each token
-    P_b = P_u.unsqueeze(0).repeat(config['vocab_size'], 1)
+    P_b = P_u.unsqueeze(0).repeat(config['vocab_size'], 1).to(device) # Shape (vocab_size, vocab_size)
+
+
 
     # Initialize Model
     model = DualModel(config)
-    model , device = initialize_dual_model(model , P_b)
-    print("Model initialized at device: ", device) 
+    # model , device = initialize_dual_model(model , P_b)
+    # print("Model initialized at device: ", device) 
 
     # Define loss
     loss_fn = nn.CrossEntropyLoss()
@@ -68,21 +75,30 @@ def main():
 
 
     # Test several trigger numbers
-    K_values = np.unique(np.linspace(1, config['vocab_size'], num=15, dtype=int))
+    K_values = np.unique(np.linspace(1, config['vocab_size'], num=8, dtype=int))
 
     results = {
         'K_values': K_values,
         'loss_bi': [],
         'loss_ind': [],
-        'loss_tot': [],
-    }
+        'loss_tot': [] }
+
+
+    
     results['entropy_P_u']= (-(P_u * torch.log(P_u + 1e-10)).sum().item()) # Add small constant for numerical stability
     results['max_entropy']= (np.log(config['vocab_size']))
 
     for K in K_values:
         config['K'] = K
-
+        # Sample trigger tokens if not fixed
+        trigger_set = None
+        if config['fix_trig']:
+            trigger_set = torch.multinomial(P_t, num_samples=config['K'], replacement=False).tolist()
+            print(f"Fixed trigger set: {trigger_set}")
+            
         print(f"\nRunning experiment with K: {K}, initializing...")
+        model , device = initialize_dual_model(model , P_b, trigger_set=trigger_set)
+        print("Model initialized at device: ", device)
        
 
         # Test planted model

@@ -49,7 +49,7 @@ def generate_copying_data(num_samples:int, seq_len:int, vocab_size:int,p_error:f
 
 
 
-def get_sample_dual_task(L:int, K: int ,P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor):
+def get_sample_dual_task(L:int, K: int ,P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor, trigger_set:list=None):
     """
     Generate a single sample for the dual task.
     Args:
@@ -59,6 +59,7 @@ def get_sample_dual_task(L:int, K: int ,P_b:torch.Tensor,P_u:torch.Tensor,P_o:to
         P_u (torch.tensor): Unigram probability vector of shape (V,) P_u[i] = P(token i)
         P_o (torch.tensor): Probability for output tokens of a trigger token, shape (V,V) P_o[i,j] = P(output token j | trigger token i)
         P_t (torch.tensor): Probability for trigger tokens, shape (V,) P_t[i] = P(trigger token i)
+        trigger_set (list): List of trigger tokens to use in the sequence. If None, trigger tokens will be sampled from P_t.
         
     Returns:
         input (torch.tensor): Input sequence of shape (L,)
@@ -71,8 +72,12 @@ def get_sample_dual_task(L:int, K: int ,P_b:torch.Tensor,P_u:torch.Tensor,P_o:to
     - If the previour token is a trigger token, the next token is deterministically the output token corresponding to that trigger token.
     - If the previous token is not a trigger token, the next token is sampled from P_b depending on the previous token.
     """
-    # Sample K trigger tokens from P_t without replacement
-    trigger_set = torch.multinomial(P_t, num_samples=K, replacement=False).tolist()
+    if trigger_set is None:
+        # Sample K trigger tokens from P_t without replacement
+        trigger_set = torch.multinomial(P_t, num_samples=K, replacement=False).tolist()
+    else:
+        assert len(trigger_set) == K, "Length of trigger_set must be equal to K."
+
     # Sample an output token for each trigger token in the sequence according to P_o
     output_set = [ torch.multinomial(P_o[trigger_token], num_samples=1).item() for trigger_token in trigger_set]
     # print("Output set for trigger tokens: ", output_set)
