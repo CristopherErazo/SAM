@@ -33,7 +33,7 @@ def main():
     parser.add_argument('--mode', type=str, default='uniform', help='Data distribution mode: uniform or random')
     parser.add_argument('--alpha', type=float, default=1.0, help='Exponent for the unigram distribution (Zipf\'s law)')
     parser.add_argument('--fix_trig',type=str,default='True', help='Whether to fix the trigger tokens across all experiments. If False, trigger tokens will be randomly sampled at each sequence')
-
+    
     args = parser.parse_args()
     config = vars(args)
 

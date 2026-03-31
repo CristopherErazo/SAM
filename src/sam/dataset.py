@@ -1,6 +1,8 @@
 from torch.utils.data import Dataset, DataLoader , random_split
 import torch
-
+import math
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 
 ################################################################
 ################################################################
@@ -76,7 +78,7 @@ def get_sample_dual_task(L:int, K: int ,P_b:torch.Tensor,P_u:torch.Tensor,P_o:to
         # Sample K trigger tokens from P_t without replacement
         trigger_set = torch.multinomial(P_t, num_samples=K, replacement=False).tolist()
     else:
-        assert len(trigger_set) == K, "Length of trigger_set must be equal to K."
+        assert len(trigger_set) == K, f"Length of trigger_set must be equal to K. Instead got trigger_set of length , {len(trigger_set)}, and K = , {K}"
 
     # Sample an output token for each trigger token in the sequence according to P_o
     output_set = [ torch.multinomial(P_o[trigger_token], num_samples=1).item() for trigger_token in trigger_set]
@@ -87,6 +89,7 @@ def get_sample_dual_task(L:int, K: int ,P_b:torch.Tensor,P_u:torch.Tensor,P_o:to
 
     cnts = {} # dictionary to count occurrences of each token in the sequence, initialized with the first token
     counts = []
+    is_trigg = []
 
     for i in range(1,L):
         prev_token = sequence[i-1].item()
@@ -96,87 +99,186 @@ def get_sample_dual_task(L:int, K: int ,P_b:torch.Tensor,P_u:torch.Tensor,P_o:to
             # If the previous token is a trigger token, the next token is deterministically the output token corresponding to that trigger token
             trigger_index = trigger_set.index(prev_token)
             sequence[i] = output_set[trigger_index]
+            is_trigg.append(1)
         else:
             # If the previous token is not a trigger token, the next token is sampled from P_b depending on the previous token
             sequence[i] = torch.multinomial(P_b[prev_token], num_samples=1).item()
+            is_trigg.append(0)
 
     prev_token = sequence[L].item()
     cnts[prev_token] = cnts.get(prev_token,0) + 1
     counts.append(cnts[prev_token])
-    return sequence , torch.tensor(trigger_set) , torch.tensor(output_set) , torch.tensor(counts)
+    is_trigg.append(1 if prev_token in trigger_set else 0)
 
+    return sequence , trigger_set.copy() , torch.tensor(output_set) , torch.tensor(counts), torch.tensor(is_trigg)
 
-def generate_dual_task_data(num_samples:int, seq_len:int,K:int, P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor) -> list[dict]:
+def get_triggers(fix_trig:bool,trig_type:str,K:int,P_t:torch.Tensor):
+    vocab_size = P_t.shape[0]
+    trigger_set = None
+    if fix_trig:
+        if trig_type == 'freq':
+            trigger_set = [k for k in range(K)]
+        elif trig_type == 'rare':
+            trigger_set = [vocab_size - 1 - k for k in range(K)] 
+        elif trig_type == 'rand':
+            trigger_set = torch.multinomial(P_t, num_samples=K, replacement=False).tolist()
+        print(f"Using fixed {trig_type} trigger set")
+        print(f"Length of trigger set: {len(trigger_set)}, Trigger set: {trigger_set}")
+    else:
+        print(f"Using random trigger set at each sequence")
+    return trigger_set
+
+def generate_dual_task_data(num_samples:int, seq_len:int,K:int, P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor,trigger_set:list=None) -> list[dict]:
     """Generate a dataset for the copying task."""
     data = []
     for _ in range(num_samples):
-        sequence , trigger_set  , output_set , counts = get_sample_dual_task(seq_len,K,P_b,P_u,P_o,P_t)
+        sequence , trigg_set  , output_set , counts , is_trigg = get_sample_dual_task(seq_len,K,P_b,P_u,P_o,P_t,trigger_set)
         data.append({
             'sequence' : sequence,
-            'trigger_set' : trigger_set,
+            'trigger_set' : trigg_set,
             'output_set' : output_set,
-            'counts' : counts
+            'counts' : counts,
+            'is_trigg' : is_trigg
         })
     return data
 
-def generate_dual_task_batch(batch_size:int, seq_len:int,K:int, P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor) -> dict[str, torch.Tensor]:
+def generate_dual_task_batch(batch_size:int, seq_len:int,K:int, P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor,trigger_set:list=None) -> dict[str, torch.Tensor]:
     """Generate a batch of data for the dual task."""
-    sequences = []
-    trigger_sets = []
-    output_sets = []
-    counts_list = []
-    for _ in range(batch_size):
-        sequence , trigger_set  , output_set , counts = get_sample_dual_task(seq_len,K,P_b,P_u,P_o,P_t)
-        sequences.append(sequence)
-        trigger_sets.append(trigger_set)
-        output_sets.append(output_set)
-        counts_list.append(counts)
-    
+    def generate_sample():
+        return get_sample_dual_task(seq_len, K, P_b, P_u, P_o, P_t, trigger_set)
+
+    with ThreadPoolExecutor() as executor:
+        results = list(executor.map(lambda _: generate_sample(), range(batch_size)))
+
+    sequences, trigger_sets, output_sets, counts_list, is_trigg_list = zip(*results)
+
     mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool)) # (1, L, L) for multi-head attention
     batch_mask = mask.unsqueeze(0).expand(batch_size, -1, -1) # (batch_size, seq_len, seq_len)
-    return {
-        'sequence' : torch.stack(sequences), # shape (batch_size, seq_len)
-        'trigger_set' : torch.stack(trigger_sets), # shape (batch_size, K)
-        'output_set' : torch.stack(output_sets), # shape (batch_size, K)
-        'counts' : torch.stack(counts_list), # shape (batch_size, seq_len)
-        'mask' : batch_mask # shape (batch_size, seq_len, seq_len)
 
+    return {
+        'sequence': torch.stack(sequences), # shape (batch_size, seq_len)
+        'trigger_set': torch.stack([torch.tensor(trigg_set) for trigg_set in trigger_sets]), # shape (batch_size, K)
+        'output_set': torch.stack(output_sets), # shape (batch_size, K)
+        'counts': torch.stack(counts_list), # shape (batch_size, seq_len)
+        'mask': batch_mask, # shape (batch_size, seq_len, seq_len)
+        'is_trigg': torch.stack(is_trigg_list) # shape (batch_size, seq_len)
     }
 
+def generate_dual_task_batch_parallel(batch_size:int, seq_len:int,K:int, P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor,trigger_set:list=None) -> dict[str, torch.Tensor]:
+    """Generate a batch of data for the dual task."""
+    def generate_sample(_):
+        return get_sample_dual_task(seq_len, K, P_b, P_u, P_o, P_t, trigger_set)
 
-def get_distributions(vocab_size:int,mode:str='uniform',beta:float=1.0) -> tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
+    with ProcessPoolExecutor() as executor:
+        results = list(executor.map(generate_sample, range(batch_size)))
+
+    sequences, trigger_sets, output_sets, counts_list, is_trigg_list = zip(*results)
+
+    mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool)) # (1, L, L) for multi-head attention
+    batch_mask = mask.unsqueeze(0).expand(batch_size, -1, -1) # (batch_size, seq_len, seq_len)
+
+    return {
+        'sequence': torch.stack(sequences), # shape (batch_size, seq_len)
+        'trigger_set': torch.stack([torch.tensor(trigg_set) for trigg_set in trigger_sets]), # shape (batch_size, K)
+        'output_set': torch.stack(output_sets), # shape (batch_size, K)
+        'counts': torch.stack(counts_list), # shape (batch_size, seq_len)
+        'mask': batch_mask, # shape (batch_size, seq_len, seq_len)
+        'is_trigg': torch.stack(is_trigg_list) # shape (batch_size, seq_len)
+    }
+
+def get_spike_vector(vocab_size:int , P_u:torch.Tensor) -> torch.Tensor:    
+    u = torch.empty_like(P_u)
+    s_pos = 0.0
+    s_neg = 0.0
+    for i in range(vocab_size):
+        if s_pos <= s_neg:
+            u[i] = 1.0
+            s_pos += P_u[i].item()
+        else:
+            u[i] = -1.0
+            s_neg += P_u[i].item()
+    return u
+
+
+def get_distributions(vocab_size:int,b_type:str='dirichlet',alpha:float=1.0,device:str='cpu',u_type:str=None, beta:float=None) -> tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
     """Get probability distributions P_b, P_u, P_o and P_t for the dual task data generation.
-    Args:
-        vocab_size (int): Size of the vocabulary
-        mode (str): Type of distribution to generate. Options are 'uniform' and 'random'.
-    Returns:
-        P_b (torch.tensor): Bigram probability matrix of shape (V,V) P_b[i,j]  = P(token j | token i)
-        P_u (torch.tensor): Unigram probability vector of shape (V,) P_u[i] = P(token i)
-        P_o (torch.tensor): Probability for output tokens of a trigger token, shape (V,V) P_o[i,j] = P(output token j | trigger token i)
-        P_t (torch.tensor): Probability for trigger tokens, shape (V,) P_t[i] = P(trigger token i)
-    """
-    if mode == 'uniform':
-        P_b = torch.ones((vocab_size, vocab_size)) / vocab_size # Uniform distribution over next tokens
-        P_u = torch.ones(vocab_size) / vocab_size # Uniform distribution over first token
-        P_o = torch.ones((vocab_size, vocab_size)) 
-        # Mask out the diagonal to avoid repeating the same trigger token
-        P_o = P_o.masked_fill(torch.eye(vocab_size, dtype=torch.bool), float('-inf'))
-        P_o = P_o.softmax(dim=-1) # Uniform distribution over output tokens for each
-        P_t = torch.ones(vocab_size) / vocab_size # Uniform distribution over trigger tokens
-    elif mode == 'random':
-        P_b = torch.randn((vocab_size, vocab_size)) * beta
-        P_b = torch.softmax(P_b, dim=-1) # Normalize to get probabilities
-        P_u = torch.randn(vocab_size) * beta
-        P_u = torch.softmax(P_u, dim=-1) # Normalize to get probabilities
-        P_o = torch.randn((vocab_size, vocab_size)) * beta
-        P_o = P_o.masked_fill(torch.eye(vocab_size, dtype=torch.bool), float('-inf')) # Mask out the diagonal to avoid repeating the same trigger token
-        P_o = torch.softmax(P_o, dim=-1) # Normalize to get probabilities
-        P_t = torch.randn(vocab_size) * beta
-        P_t = torch.softmax(P_t, dim=-1) # Normalize to get probabilities
-    else:
-        raise ValueError("Invalid mode. Options are 'uniform' and 'random'.")
-    return P_b, P_u, P_o, P_t
 
+    Args:
+        - vocab_size (int): Size of the vocabulary
+        - b_type (str): Type of bigram distribution to generate. Options are 'dirichlet' and 'spiked'. 'dirichlet' samples the bigram distribution from a dirichlet distribution with concentration parameter alpha. 'spiked' generates a bigram distribution that is correlated with the unigram distribution, with more frequent tokens having higher probabilities of being followed by other tokens, using the formula P_b[i,j] = P_u[j] * (1 - beta * u[i] * u[j]) where u[i] is 1 for more frequent tokens and -1 for less frequent tokens.
+        - alpha (float): Concentration parameter for the Dirichlet distribution used to generate the big
+        unigram distribution P_u if b_type is 'dirichlet', or exponent for the zipf distribution if u_type is 'zipf' and b_type is 'spiked'.
+        - u_type (str): Type of unigram distribution to generate if b_type is 'spiked'. Options are 'dirichlet' and 'zipf'. If 'dirichlet', the unigram distribution is sampled from a dirichlet distribution with concentration parameter alpha. If 'zipf', the unigram distribution is generated using a zipf distribution with exponent alpha.
+        - beta (float): Concentration parameter for the Dirichlet distribution used to generate the bigram distribution P_b from the unigram distribution P_u using the formula P_b[i,j] = P_u[j] * (1 - beta * u[i] * u[j]) where u[i] is 1 for more frequent tokens and -1 for less frequent tokens. This creates a bigram distribution that is correlated with the unigram distribution, with more frequent tokens having higher probabilities of being followed by other tokens. Only used if b_type is 'spiked'.
+
+    Returns:
+        - P_b (torch.tensor): Bigram probability matrix of shape (V,V) P_b[i,j]  = P(token j | token i)
+        - P_u (torch.tensor): Unigram probability vector of shape (V,) P_u[i] = P(token i)
+        - P_o (torch.tensor): Probability for output tokens of a trigger token, shape (V,V) P_o[i,j] = P(output token j | trigger token i)
+        - P_t (torch.tensor): Probability for trigger tokens, shape (V,) P_t[i] = P(trigger token i)
+    """
+
+    if b_type == 'dirichlet': 
+        print("Sampling bigram distribution from a Dirichlet distribution with concentration parameter alpha = ", alpha)
+        # Sample bigram distribution from a dirichlet distribution with concentration parameter alpha
+        concentration = torch.ones((vocab_size, vocab_size)) * alpha
+        P_b = torch.distributions.dirichlet.Dirichlet(concentration).sample()
+        # Compute unigram distribution as the stationary distribution of P_b
+        eigenvalues, eigenvectors = torch.linalg.eig(P_b.T)
+        P_u = eigenvectors[:, torch.isclose(eigenvalues.real, torch.tensor(1.0))].real.squeeze()
+        P_u /= P_u.sum()  # Normalize
+        # Sort P_u and P_b in descending order of P_u for better interpretability (most frequent tokens first)
+        sorted_indices = torch.argsort(P_u, descending=True)
+        P_u = P_u[sorted_indices]
+        P_b = P_b[sorted_indices][:, sorted_indices]
+
+    elif b_type == 'spiked':
+        print("Generating spiked bigram distribution with alpha = ", alpha, " and beta = ", beta)
+        assert u_type is not None and beta is not None, "u_type and beta must be specified for spiked bigram distribution."
+        if u_type == 'dirichlet':
+            print("Sampling unigram distribution from a Dirichlet distribution with concentration parameter alpha = ", alpha)
+            P_u = torch.distributions.dirichlet.Dirichlet(torch.ones(vocab_size) * alpha).sample()
+        elif u_type == 'zipf':
+            print("Generating unigram distribution from a Zipf distribution with exponent alpha = ", alpha)
+            ranks = torch.arange(1, vocab_size + 1)
+            P_u = 1.0 / ranks**alpha
+            P_u /= P_u.sum() # Normalize to get a valid probability distribution
+        else:
+            raise ValueError("Invalid u_type. Options are 'dirichlet' and 'zipf'.")
+        
+        P_u = P_u.sort(descending=True).values # Sort unigram distribution in descending order for better interpretability (most frequent tokens first)
+        u = get_spike_vector(vocab_size, P_u)
+        P_b = P_u[None,:] * (1 - beta * u[:,None] * u[None,:]) # Generate bigram distribution P_b from unigram distribution P_u using the formula P_b[i,j] = P_u[j] * (1 - beta * u[i] * u[j]) where u[i] is 1 for more frequent tokens and -1 for less frequent tokens. This creates a bigram distribution that is correlated with the unigram distribution, with more frequent tokens having higher probabilities of being followed by other tokens.
+        
+
+    assert torch.all(P_b >= 0), "P_b contains negative probabilities."
+    assert torch.allclose(P_b.sum(dim=-1), torch.ones(vocab_size),rtol=0.0001), "Rows of P_b do not sum to 1."
+    assert torch.all(P_u >= 0), "P_u contains negative probabilities."
+    assert torch.isclose(P_u.sum(), torch.tensor(1.0)), "P_u does not sum to 1."    
+    # Renormalize
+    P_b /= P_b.sum(dim=-1, keepdim=True)    
+
+
+    P_t = P_u.clone() # Trigger distribution is the same as unigram distribution
+    P_o = torch.ones((vocab_size,vocab_size)) / (vocab_size-1) # Uniform distribution over outputs given triggers apart from the trigger token itself
+    P_o.fill_diagonal_(0) # Set diagonal to 0 since output cannot be the same as the trigger token
+
+    return P_b.to(device), P_u.to(device), P_o.to(device), P_t.to(device)
+    
+
+def compute_entropies_and_dkl(P_b:torch.Tensor,P_u:torch.Tensor):
+    vocab_size = P_u.shape[0]
+    # Average dkl between bigram distribution and uniform 1/V
+    kl_Pb_uniform = (P_b * (torch.log(P_b + 1e-10) - math.log(1.0/vocab_size + 1e-10))).sum(dim=-1).mean().item()
+    
+    # dkl between unigram and uniform 1/V
+    kl_Pu_uniform = (P_u * (torch.log(P_u + 1e-10) - math.log(1.0/vocab_size + 1e-10))).sum().item()
+   
+    # Average entropy of bigram distribution
+    entropy_Pb = -(P_b * torch.log(P_b + 1e-10)).sum(dim=-1).mean().item()
+    entropy_Pu = -(P_u * torch.log(P_u + 1e-10)).sum().item()
+    max_entropy = math.log(vocab_size)
+    return kl_Pb_uniform, kl_Pu_uniform, entropy_Pb, entropy_Pu, max_entropy
     
 
 class InContextDataset(Dataset):
@@ -255,7 +357,7 @@ def get_dataloader(config:dict) -> tuple[DataLoader,DataLoader]:
     """
     n = config['dataset_size']
     L = config['seq_len']
-    V = config['vocab_size']
+    V = vocab_size
     p_error = config['p_error']
 
     train_size = int(config['train_fraction'] * n)
@@ -274,5 +376,5 @@ def get_dataloader(config:dict) -> tuple[DataLoader,DataLoader]:
     val_dataloader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False )
     return train_dataloader, val_dataloader
 
-    
+
 
