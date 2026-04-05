@@ -26,28 +26,16 @@ test_size=200 # Number of samples in the test set
 K=20 # Number of trigger tokens
 lr=0.008 # Learning rate
 b_type='spiked' # P_b distribution type: dirichlet or spiked
-u_type='dirichlet' # P_u distribution type: dirichlet or zipf (only used if b_type is spiked)
-alpha=0.1 # Dirichlet concentration parameter or exponent for the Zipf's law
+u_type='zipf' # P_u distribution type: dirichlet or zipf (only used if b_type is spiked)
+alpha=1 # Dirichlet concentration parameter or exponent for the Zipf's law
 beta=0.9 # Beta parameter for spiked bigram distribution (only used if b_type is spiked)
 fix_trig='True' # Whether to fix the trigger tokens across all experiments.
 trig_type='freq' # Whether the trigger tokens should be the most freq, rare or random according to P_u. Only used if fix_trig is True.
 
 # Configurations to loop over
 configurations=(
-    # 'dirichlet 2'
-    # 'spiked 2'
-    'dirichlet 5'
-    'spiked 5'
-    'dirichlet 10'
-    'spiked 10'
     'dirichlet 15'
-    'spiked 15'
-    'dirichlet 20'
     'spiked 20'
-    'dirichlet 30'
-    'spiked 30'
-    # 'dirichlet 40'
-    # 'spiked 40'
 )
 
 # Function to run a single configuration
@@ -55,7 +43,7 @@ run_config() {
     local b_type="$1"
     local K="$2"
     local log_file
-    log_file="logs/${experiment_name}_btype${b_type}_K${K}.log"
+    log_file="logs/${experiment_name}_btype${b_type}_K${K}_utype${u_type}.log"
 
     echo "Logging to ${log_file}"
     time_init=$(date +%s)

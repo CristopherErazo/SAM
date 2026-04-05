@@ -9,8 +9,14 @@ set_font_sizes(conf='tight')
 def plot_panel(ax,time,data_panel,data_settings,title=None):
     for metric_name in data_panel.keys():
         metric_data = data_panel[metric_name]
+        if len(metric_data) == 0:
+            
+            continue
+        
         ax.plot(time,metric_data,**data_settings[metric_name])
     if title is not None:
         ax.set_title(title)
-    ax.legend()
+    
     # return ax
+
+

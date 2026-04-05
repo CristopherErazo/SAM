@@ -7,40 +7,42 @@ import math
 
 
 from sam.dual_model import DualModel , initialize_dual_model
-from sam.dataset import get_dataloader_dual_task , get_distributions , get_sample_dual_task, generate_dual_task_batch, compute_entropies_and_dkl, get_triggers
+from sam.dataset import get_dataloader_dual_task , get_distributions , get_sample_dual_task, generate_dual_task_batch_fast, compute_entropies_and_dkl, get_triggers
 from sam.evaluation import evaluate_induction_bigram , evaluate_dual_model, optimal_pop_losses
 from sam.optimizers import SAM_Optimizer
 
 from configurations import save_data , make_data_paths, make_params_dict
 
+from line_profiler import profile
 
 
+@profile
 def main():
     parser = argparse.ArgumentParser(description="Training Attention-Only Transformer on Copying Task")
 
-    parser.add_argument('--vocab_size', type=int, default=100, help='Vocabulary size')
-    parser.add_argument('--seq_len', type=int, default=64, help='Sequence length')
-    parser.add_argument('--K', type=int, default=4, help='Number of Trigger Tokens')
+    parser.add_argument('--vocab_size', type=int, default=64, help='Vocabulary size')
+    parser.add_argument('--seq_len', type=int, default=256, help='Sequence length')
+    parser.add_argument('--K', type=int, default=15, help='Number of Trigger Tokens')
     parser.add_argument('--d_model', type=int, default=128, help='Model dimension')
     parser.add_argument('--dropout', type=float, default=0.0, help='Dropout rate')
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for each step')
-    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
-    parser.add_argument('--n_prints', type=int, default=50, help='Number of times to print during training.')
-    parser.add_argument('--steps', type=int, default=5, help='Number of training steps.')
-    parser.add_argument('--opt', type=str, default='sgd', help='Type of optimizer: SGD, adam, or adamW')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for each step')
+    parser.add_argument('--lr', type=float, default=0.008, help='Learning rate')
+    parser.add_argument('--n_prints', type=int, default=2, help='Number of times to print during training.')
+    parser.add_argument('--steps', type=int, default=10, help='Number of training steps.')
+    parser.add_argument('--opt', type=str, default='adam', help='Type of optimizer: SGD, adam, or adamW')
     parser.add_argument('--experiment_name', type=str, default='tmp', help='Name of the experiment for saving results')
     parser.add_argument('--n_prints_model', type=int, default=5, help='Number of times to save model checkpoints during training.')
     parser.add_argument('--print_scale',type=str, default='log', help='Scale for printing steps: log or linear')
     parser.add_argument('--b_type', type=str, default='dirichlet', help='P_b distribution type: dirichlet or spiked')
     parser.add_argument('--u_type', type=str, default='zipf', help='P_u distribution type: dirichlet or zipf (only used if b_type is spiked)')
-    parser.add_argument('--alpha', type=float, default=1.0, help='Dirichlet concentration parameter or exponent for the Zipf\'s law')
+    parser.add_argument('--alpha', type=float, default=0.01, help='Dirichlet concentration parameter or exponent for the Zipf\'s law')
     parser.add_argument('--beta', type=float, default=0.5, help='Beta parameter for spiked bigram distribution (only used if b_type is spiked)')
     parser.add_argument('--fix_trig',type=str,default='True', help='Whether to fix the trigger tokens across all experiments. If False, trigger tokens will be randomly sampled at each sequence')
-    parser.add_argument('--trig_type', type=str, default='rare', help='Whether the trigger tokens should be the most freq, rare or random according to P_u. Only used if fix_trig is True.')
+    parser.add_argument('--trig_type', type=str, default='freq', help='Whether the trigger tokens should be the most freq, rare or random according to P_u. Only used if fix_trig is True.')
     parser.add_argument('--init', type=str, default='random', help='Initialization method: planted or random')
-    parser.add_argument('--test_size', type=int, default=1000, help='Number of samples in the test set')
+    parser.add_argument('--test_size', type=int, default=200, help='Number of samples in the test set')
     parser.add_argument('--momentum', type=float, default=0.9, help='Momentum for SGD optimizer')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for optimizers')
+    parser.add_argument('--weight_decay', type=float, default=0, help='Weight decay for optimizers')
     
 
    
@@ -117,7 +119,7 @@ def main():
         raise ValueError("Invalid optimizer type. Options are 'SGD', 'adam', and 'adamW'.")
     
 
-    test_batch = generate_dual_task_batch(config['test_size'], config['seq_len'], config['K'], P_b, P_u, P_o, P_t, trigger_set=trigger_set)
+    test_batch = generate_dual_task_batch_fast(config['test_size'], config['seq_len'], config['K'], P_b, P_u, P_o, P_t, trigger_set=trigger_set)#, device=device)
 
     phi1, phi2, phi3, trigg_per_seq = optimal_pop_losses(test_batch, P_b=P_b, p0=0.999)
  
@@ -199,7 +201,7 @@ def main():
             print(f"Saved model checkpoint at step {step} to {model_path}")
 
             
-        batch = generate_dual_task_batch(config['batch_size'], config['seq_len'], config['K'], P_b, P_u, P_o, P_t, trigger_set=trigger_set)
+        batch = generate_dual_task_batch_fast(config['batch_size'], config['seq_len'], config['K'], P_b, P_u, P_o, P_t, trigger_set=trigger_set)#,device=device)
 
         # Evaluate model on the dual task
         sequence = batch['sequence'].to(device) # shape (batch_size, seq_len + 1)

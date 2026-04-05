@@ -3,6 +3,7 @@ import torch
 import math
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import ProcessPoolExecutor
+from line_profiler import profile
 
 ################################################################
 ################################################################
@@ -50,6 +51,21 @@ def generate_copying_data(num_samples:int, seq_len:int, vocab_size:int,p_error:f
     return data
 
 
+def get_triggers(fix_trig:bool,trig_type:str,K:int,P_t:torch.Tensor):
+    vocab_size = P_t.shape[0]
+    trigger_set = None
+    if fix_trig:
+        if trig_type == 'freq':
+            trigger_set = [k for k in range(K)]
+        elif trig_type == 'rare':
+            trigger_set = [vocab_size - 1 - k for k in range(K)] 
+        elif trig_type == 'rand':
+            trigger_set = torch.multinomial(P_t, num_samples=K, replacement=False).tolist()
+        print(f"Using fixed {trig_type} trigger set")
+        print(f"Length of trigger set: {len(trigger_set)}, Trigger set: {trigger_set}")
+    else:
+        print(f"Using random trigger set at each sequence")
+    return torch.tensor(trigger_set)
 
 def get_sample_dual_task(L:int, K: int ,P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor, trigger_set:list=None):
     """
@@ -110,81 +126,162 @@ def get_sample_dual_task(L:int, K: int ,P_b:torch.Tensor,P_u:torch.Tensor,P_o:to
     counts.append(cnts[prev_token])
     is_trigg.append(1 if prev_token in trigger_set else 0)
 
-    return sequence , trigger_set.copy() , torch.tensor(output_set) , torch.tensor(counts), torch.tensor(is_trigg)
+    return sequence , torch.tensor(trigger_set.copy()) , torch.tensor(output_set) , torch.tensor(counts), torch.tensor(is_trigg)
 
-def get_triggers(fix_trig:bool,trig_type:str,K:int,P_t:torch.Tensor):
-    vocab_size = P_t.shape[0]
-    trigger_set = None
-    if fix_trig:
-        if trig_type == 'freq':
-            trigger_set = [k for k in range(K)]
-        elif trig_type == 'rare':
-            trigger_set = [vocab_size - 1 - k for k in range(K)] 
-        elif trig_type == 'rand':
-            trigger_set = torch.multinomial(P_t, num_samples=K, replacement=False).tolist()
-        print(f"Using fixed {trig_type} trigger set")
-        print(f"Length of trigger set: {len(trigger_set)}, Trigger set: {trigger_set}")
+def generate_dual_task_batch(batch_size:int, seq_len:int,K:int, P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor,trigger_set: torch.Tensor | None = None,) -> dict[str, torch.Tensor]:
+    """Generate a batch of data for the dual task."""
+    sequences = []
+    trigger_sets = []
+    output_sets = []
+    counts_list = []
+    is_trigg_list = []
+    for _ in range(batch_size):
+        sequence , trigg_set  , output_set , counts , is_trigg = get_sample_dual_task(seq_len,K,P_b,P_u,P_o,P_t,trigger_set=trigger_set)
+        sequences.append(sequence)
+        trigger_sets.append(trigg_set)
+        output_sets.append(output_set)
+        counts_list.append(counts)
+        is_trigg_list.append(is_trigg)
+
+    mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool)) # (1, L, L) for multi-head attention
+    batch_mask = mask.unsqueeze(0).expand(batch_size, -1, -1) # (batch_size, seq_len, seq_len)
+    return {
+        'sequence' : torch.stack(sequences), # shape (batch_size, seq_len)
+        'trigger_set' : torch.stack(trigger_sets), # shape (batch_size, K)
+        'output_set' : torch.stack(output_sets), # shape (batch_size, K)
+        'counts' : torch.stack(counts_list), # shape (batch_size, seq_len)
+        'mask' : batch_mask, # shape (batch_size, seq_len, seq_len)
+        'is_trigg' : torch.stack(is_trigg_list) # shape (batch_size, seq_len)
+
+
+    }
+
+@profile
+def generate_dual_task_batch_fast(
+    num_samples: int,
+    L: int,
+    K: int,
+    P_b: torch.Tensor,
+    P_u: torch.Tensor,
+    P_o: torch.Tensor,
+    P_t: torch.Tensor,
+    trigger_set: torch.Tensor | None = None,
+    device: str | torch.device = "cpu",
+):
+    """
+    Fully vectorized batch generator for the dual task.
+
+    Returns:
+        dict with:
+            sequence     : (B, L)
+            trigger_set  : (B, K)
+            output_set   : (B, K)
+            counts       : (B, L)
+            is_trigg     : (B, L)
+    """
+
+    B = num_samples
+    V = P_u.shape[0]
+
+    # տեղափոխ device
+    P_b = P_b.to(device)
+    P_u = P_u.to(device)
+    P_o = P_o.to(device)
+    P_t = P_t.to(device)
+
+    # print('devices:')
+    # print(f'{P_b.device=}, {P_t.device=},{P_o.device=},{P_u.device=   }')
+
+    # ---- sample trigger sets ----
+    if trigger_set is None:
+        trigger_sets = torch.stack([
+            torch.multinomial(P_t, K, replacement=False)
+            for _ in range(B)
+        ], dim=0)
     else:
-        print(f"Using random trigger set at each sequence")
-    return trigger_set
+        trigger_set = torch.tensor(trigger_set, device=device)
+        assert trigger_set.numel() == K
+        trigger_sets = trigger_set.unsqueeze(0).repeat(B, 1)
 
-def generate_dual_task_data(num_samples:int, seq_len:int,K:int, P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor,trigger_set:list=None) -> list[dict]:
-    """Generate a dataset for the copying task."""
-    data = []
-    for _ in range(num_samples):
-        sequence , trigg_set  , output_set , counts , is_trigg = get_sample_dual_task(seq_len,K,P_b,P_u,P_o,P_t,trigger_set)
-        data.append({
-            'sequence' : sequence,
-            'trigger_set' : trigg_set,
-            'output_set' : output_set,
-            'counts' : counts,
-            'is_trigg' : is_trigg
-        })
-    return data
+    # ---- sample output tokens ----
+    # shape: (B, K)
+    output_sets = torch.zeros(B, K, dtype=torch.long, device=device)
+    for k in range(K):
+        output_sets[:, k] = torch.multinomial(
+            P_o[trigger_sets[:, k]], 1
+        ).squeeze(-1)
 
-def generate_dual_task_batch(batch_size:int, seq_len:int,K:int, P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor,trigger_set:list=None) -> dict[str, torch.Tensor]:
-    """Generate a batch of data for the dual task."""
-    def generate_sample():
-        return get_sample_dual_task(seq_len, K, P_b, P_u, P_o, P_t, trigger_set)
+    # ---- build trigger mask ----
+    trigger_mask = torch.zeros(B, V, dtype=torch.bool, device=device)
+    trigger_mask.scatter_(1, trigger_sets, True)
 
-    with ThreadPoolExecutor() as executor:
-        results = list(executor.map(lambda _: generate_sample(), range(batch_size)))
+    # ---- build mapping trigger -> output ----
+    mapping = torch.full((B, V), -1, dtype=torch.long, device=device)
+    mapping.scatter_(1, trigger_sets, output_sets)
 
-    sequences, trigger_sets, output_sets, counts_list, is_trigg_list = zip(*results)
+    # ---- initialize sequence ----
+    sequence = torch.zeros(B, L+1, dtype=torch.long, device=device)
+    sequence[:, 0] = torch.multinomial(P_u, B, replacement=True)
 
-    mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool)) # (1, L, L) for multi-head attention
-    batch_mask = mask.unsqueeze(0).expand(batch_size, -1, -1) # (batch_size, seq_len, seq_len)
+    # ---- outputs ----
+    is_trigg = torch.zeros(B, L+1, dtype=torch.long, device=device)
+    counts = torch.zeros(B, L+1, dtype=torch.long, device=device)
 
+    # for counting occurrences
+    token_counts = torch.zeros(B, V, dtype=torch.long, device=device)
+
+    # ---- main loop over sequence length ----
+    for t in range(L+1):
+        current = sequence[:, t]
+
+        # update counts
+        token_counts.scatter_add_(
+            1,
+            current.unsqueeze(1),
+            torch.ones(B, 1, dtype=torch.long, device=device),
+        )
+        counts[:, t] = token_counts[
+            torch.arange(B, device=device), current
+        ]
+
+        # mark trigger
+        is_trigg[:, t] = trigger_mask[
+            torch.arange(B, device=device), current
+        ].long()
+
+        if t == L:
+            break
+
+        # ---- next token ----
+        prev = current
+
+        # sample bigram transitions
+        next_tokens = torch.multinomial(
+            P_b[prev], 1
+        ).squeeze(-1)
+
+        # override if trigger
+        mapped = mapping[
+            torch.arange(B, device=device), prev
+        ]
+
+        trigger_positions = mapped != -1
+        next_tokens[trigger_positions] = mapped[trigger_positions]
+
+        sequence[:, t + 1] = next_tokens
+
+    mask = torch.tril(torch.ones((L, L), dtype=torch.bool)) # (1, L, L) for multi-head attention
+    batch_mask = mask.unsqueeze(0).expand(B, -1, -1) # (batch_size, seq_len, seq_len)
+    
     return {
-        'sequence': torch.stack(sequences), # shape (batch_size, seq_len)
-        'trigger_set': torch.stack([torch.tensor(trigg_set) for trigg_set in trigger_sets]), # shape (batch_size, K)
-        'output_set': torch.stack(output_sets), # shape (batch_size, K)
-        'counts': torch.stack(counts_list), # shape (batch_size, seq_len)
-        'mask': batch_mask, # shape (batch_size, seq_len, seq_len)
-        'is_trigg': torch.stack(is_trigg_list) # shape (batch_size, seq_len)
+        "sequence": sequence, # shape (B, L+1)
+        "trigger_set": trigger_sets, # shape (B, K)
+        "output_set": output_sets, # shape (B, K)
+        "counts": counts[:,:L],    # shape (B, L)
+        "is_trigg": is_trigg[:,:L], # shape (B, L)
+        "mask": batch_mask # shape (B, L, L)
     }
 
-def generate_dual_task_batch_parallel(batch_size:int, seq_len:int,K:int, P_b:torch.Tensor,P_u:torch.Tensor,P_o:torch.Tensor,P_t:torch.Tensor,trigger_set:list=None) -> dict[str, torch.Tensor]:
-    """Generate a batch of data for the dual task."""
-    def generate_sample(_):
-        return get_sample_dual_task(seq_len, K, P_b, P_u, P_o, P_t, trigger_set)
-
-    with ProcessPoolExecutor() as executor:
-        results = list(executor.map(generate_sample, range(batch_size)))
-
-    sequences, trigger_sets, output_sets, counts_list, is_trigg_list = zip(*results)
-
-    mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool)) # (1, L, L) for multi-head attention
-    batch_mask = mask.unsqueeze(0).expand(batch_size, -1, -1) # (batch_size, seq_len, seq_len)
-
-    return {
-        'sequence': torch.stack(sequences), # shape (batch_size, seq_len)
-        'trigger_set': torch.stack([torch.tensor(trigg_set) for trigg_set in trigger_sets]), # shape (batch_size, K)
-        'output_set': torch.stack(output_sets), # shape (batch_size, K)
-        'counts': torch.stack(counts_list), # shape (batch_size, seq_len)
-        'mask': batch_mask, # shape (batch_size, seq_len, seq_len)
-        'is_trigg': torch.stack(is_trigg_list) # shape (batch_size, seq_len)
-    }
 
 def get_spike_vector(vocab_size:int , P_u:torch.Tensor) -> torch.Tensor:    
     u = torch.empty_like(P_u)

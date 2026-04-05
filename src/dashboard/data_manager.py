@@ -24,6 +24,7 @@ def get_scalar_measurements(params, Ks,configs,metrics):
         elif conf == 'zipf_spiked':
             params['variable']['b_type'] = 'spiked'
             params['variable']['u_type'] = 'zipf'
+            params['variable']['alpha'] = 1.0
         else:
             raise ValueError(f"Unknown configuration: {conf}")
         
