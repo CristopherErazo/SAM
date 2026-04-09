@@ -145,10 +145,10 @@ def generate_dual_task_batch(num_samples: int,
     
 
     # Move to device
-    P_b = distributions['P_b']#.to(device)
-    P_u = distributions['P_u']#.to(device)
-    P_o = distributions['P_o']#.to(device)
-    P_t = distributions['P_t']#.to(device)
+    P_b = distributions['P_b'].to(device)
+    P_u = distributions['P_u'].to(device)
+    P_o = distributions['P_o'].to(device)
+    P_t = distributions['P_t'].to(device)
     V = P_u.shape[0]
 
     # assert P_b.device == 'cuda' , "P_b is not on the correct device, got device = " + str(P_b.device)
@@ -160,7 +160,7 @@ def generate_dual_task_batch(num_samples: int,
         ], dim=0)
     else:
         # trigger_set = torch.tensor(trigger_set, device=device)
-        # trigger_set = trigger_set.to(device)
+        trigger_set = trigger_set.to(device)
         assert trigger_set.numel() == K
         trigger_sets = trigger_set.unsqueeze(0).repeat(B, 1)
 
@@ -192,7 +192,6 @@ def generate_dual_task_batch(num_samples: int,
 
     # for counting occurrences
     token_counts = torch.zeros(B, V, dtype=torch.long, device=device)
-    print(f'{trigger_mask.device=}, {mapping.device=}, {sequence.device=}, {token_counts.device=}')
     # ---- main loop over sequence length ----
     for t in range(L+1):
         current = sequence[:, t]

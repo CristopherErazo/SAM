@@ -96,16 +96,13 @@ class EvalContext:
         self.P_u = P_u.to(device) # shape (V,)
 
         with torch.no_grad():
-            self.logits = model(self.input, self.mask) # shape (B, L, V)
+            self.logits = model(self.input, self.mask, path='full') # shape (B, L, V)
+            self.logits_bigram = model(self.input, self.mask, path='bigram') # shape (B, L, V)
+            self.logits_induction = model(self.input, self.mask, path='induction') # shape (B, L, V)
+
             self.model_prob = torch.softmax(self.logits, dim=-1) # shape (B, L, V)
+            self.model_prob_bigram = torch.softmax(self.logits_bigram, dim=-1) # shape (B, L, V)
             self.std_logits = self.logits.std().item()
-
-    # Lazy import variables as properties
-
-    @property
-    def logits_bigram(self):
-        # shape (B, L, V)
-        return torch.einsum('blv,vw->blw', self.model_prob, self.P_b)
 
 
 
@@ -166,6 +163,25 @@ class LossMetric:
         # Compute loss
         return ctx.loss_fn(logits_masked, targets_masked).item()
 
+class LogitMeanMetric:
+    def __init__(self, name = 'logit', logits_fn = lambda ctx: ctx.logits[ctx.all]):
+        self.name = name
+        self.logits_fn = logits_fn
+
+    def __call__(self, ctx):
+        logits_masked = self.logits_fn(ctx)
+        
+        return logits_masked.mean().item()
+
+class LogitStdMetric:
+    def __init__(self, name = 'logit_std', logits_fn = lambda ctx: ctx.logits[ctx.all]):
+        self.name = name
+        self.logits_fn = logits_fn
+
+    def __call__(self, ctx):
+        logits_masked = self.logits_fn(ctx)
+        
+        return logits_masked.std().item()
 
 class Evaluator:
     def __init__(self, metrics):
@@ -182,33 +198,56 @@ class Evaluator:
 
         return results
     
-# metrics = [
-# LossMetric(name="loss_b_filt",
-#    logits_fn=lambda ctx: ctx.logits_bigram[ctx.only_non_triggers],
-#    target_fn=lambda ctx: ctx.target[ctx.only_non_triggers],
-#    rescale=True
-# ),
+
+def get_attention_patterns(model, test_batch, path, device, n_test = 5):
+    """ 
+    Get the attention patterns of the model on the given batch. This function is used for evaluation during training.    
+    """
+    sequence = test_batch['sequence'][:n_test].to(device) # shape (n_test, seq_len + 1)
+    input = sequence[:, :-1] # shape (n_test, seq_len)
+    mask = test_batch['mask'][:n_test].to(device) # shape (n_test, seq_len, seq_len)
+
+    with torch.no_grad():
+        output = model.full_output(input,mask, path = path)
+        attn1 = output.get('A1', None) # shape (n_test, seq_len, seq_len)
+        attn2 = output.get('A2', None) # shape (n_test, seq_len, seq_len)
+    return {'attn1': attn1, 'attn2': attn2}
+    
 
 
+def evaluate_model(model,batch,loss_fn,path,device):
+    """ 
+    Evaluate the model on the given batch and return the computed loss. This function is used for evaluation during training.    
+    """
+    # Evaluate model on the dual 
+    sequence = batch['sequence'].to(device) # shape (batch_size, seq_len + 1)
+    input = sequence[:, :-1] # shape (batch_size, seq_len)
+    target = sequence[:, 1:] # shape (batch_size, seq_len)
+    mask = batch['mask'].to(device) # shape (batch_size, seq_len, seq_len)
+    counts = batch['counts'].to(device) # shape (batch_size, seq_len)
+    trigg_set = batch['trigger_set'].to(device) # shape (batch_size, K)
 
+    logits = model(input, mask, path='full' if path=='full_trigg' else path) # shape (batch_size, seq_len, vocab_size)
+    
+    if path == 'full':
+        all = torch.ones_like(input, dtype=torch.bool) # shape (B, L)
+        logits_masked = logits[all] # shape (num_masked_positions, vocab_size)
+        target_masked = target[all] # shape (num_masked_positions,)
+    elif path == 'bigram':
+        only_non_triggers = ~( (input.unsqueeze(-1) == trigg_set.unsqueeze(1)).any(-1) ) # shape (B, L)
+        logits_masked = logits[only_non_triggers] # shape (num_masked_positions, vocab_size)
+        target_masked = target[only_non_triggers] # shape (num_masked_positions,)
+    elif path == 'induction':
+        only_triggers = (input.unsqueeze(-1) == trigg_set.unsqueeze(1)).any(-1) & (counts >= 2) # shape (B, L)
+        logits_masked = logits[only_triggers] # shape (num_masked_positions, vocab_size)
+        target_masked = target[only_triggers] # shape (num_masked_positions,)
+    elif path == 'full_trigg':
+        only_triggers = (input.unsqueeze(-1) == trigg_set.unsqueeze(1)).any(-1) & (counts >= 2) # shape (B, L)
+        logits_masked = logits[only_triggers] # shape (num_masked_positions, vocab_size)
+        target_masked = target[only_triggers] # shape (num_masked_positions,)
+    else:
+        raise ValueError("Invalid path type. Options are 'full', 'bigram', 'induction', 'full_trigg'.")
 
-# metrics = [
-
-# KLMetric(
-#     name="kl_b_full",
-#     P_fn=lambda ctx: ctx.P_b[ctx.input],
-#     Q_fn=lambda ctx: ctx.model_prob,
-# ),
-
-# KLMetric(
-#     name="kl_full_b",
-#     P_fn=lambda ctx: ctx.model_prob,
-#     Q_fn=lambda ctx: ctx.P_b[ctx.input],
-# ),
-
-# KLMetric(
-#     name="kl_full_u",
-#     P_fn=lambda ctx: ctx.P_u[None, None, :],
-#     Q_fn=lambda ctx: ctx.model_prob,
-# ),
-# ]
+    # Compute loss and update model
+    loss_trigg = loss_fn(logits_masked, target_masked)
+    return loss_trigg

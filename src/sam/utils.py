@@ -34,3 +34,20 @@ def generate_dataset(teacher: nn.Module, n:int=1000, d:int=20, eps:float = 0.0, 
     return x, y
 
 
+def reduced_batch(batch,n_test=5):
+    """Reduce the batch size to n_test for evaluation purposes. This is used to get attention patterns on a smaller batch of samples.
+    Args:
+        batch (dict): a batch of data containing tensors of shape (batch_size, seq_len) or (batch_size, seq_len, d_model)
+        n_test (int): number of samples to keep in the reduced batch
+    Returns:        reduced_batch (dict): a batch of data containing tensors of shape (n_test, seq_len) or (n_test, seq_len, d_model)
+    """
+
+    reduced_batch = {}
+    for key, value in batch.items():
+        if isinstance(value, torch.Tensor):
+            reduced_batch[key] = value[:n_test]
+        else:
+            reduced_batch[key] = value
+    return reduced_batch
+
+

@@ -52,7 +52,7 @@ class DataArgs:
     alpha_d: float = 0.1 # Dirichlet concentration parameter for bigram distribution (only used if b_type is dirichlet or u_type is dirichlet)
     alpha_z: Optional[float] = 1.0 # Exponent for the Zipf distribution used to generate the unigram distribution P_u if b_type is 'spiked' and u_type is 'zipf'
     u_type: Optional[str] = 'dirichlet' # P_u distribution type: dirichlet or zipf (only used if b_type is spiked)
-    beta: Optional[float] = 0.5 # Beta parameter for spiked bigram distribution (only used if b_type is spiked)
+    beta: Optional[float] = 0.8 # Beta parameter for spiked bigram distribution (only used if b_type is spiked)
     fix_trig: bool = True # Whether to fix the trigger tokens or not
     trig_type: Optional[str] = 'freq' # Type of fixed trigger tokens if fix_trig is True (options are 'freq', 'rare' and 'rand')
     batch_size: int = 64 # Batch size for training
@@ -61,18 +61,20 @@ class DataArgs:
 
 @dataclass
 class OptimArgs:
-    lr: float = 0.008
+    lr: float = 0.01
     opt: str = "adam"
     momentum: float = 0.9
     weight_decay: float = 0.0
 
 @dataclass 
 class ExtraArgs:
-    total_steps: int = 10 # Number of training steps
-    n_prints: int = 2 # Number of times to print during training.
-    n_prints_model: int = 5 # Number of times to save model checkpoints during training.
+    total_steps: int = 1000 # Number of training steps
+    n_prints: int = 100 # Number of times to print during training.
+    n_prints_model: int = 10 # Number of times to save model checkpoints during training.
     print_scale: str = 'linear' # Scale for printing steps: log or linear
     experiment_name: str = 'tmp' # Name of the experiment for saving results
+    file_name: str = 'results' # Name of the file for saving results
+    path: str = "full" # Path to follow (options are "full", "induction" and "bigram")
 
 @dataclass
 class TrainerArgs:

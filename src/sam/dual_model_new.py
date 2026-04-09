@@ -24,7 +24,7 @@ class AttentionLayer(nn.Module):
     def forward(self, X, mask):
         S = self.WQK(X) @ X.transpose(-2, -1)
         if self.lin_attn:
-            A = S.masked_fill(~mask, 0.0)
+            A = S.masked_fill(~mask, 0.0)/math.sqrt(X.size(-1))
         else:
             S = S*math.sqrt(X.size(-1))
             S = S.masked_fill(~mask, float('-inf'))
@@ -70,6 +70,7 @@ class DualModel(nn.Module):
         self.unembed = UnembeddingModule(self.d_model, self.vocab_size)
 
     def forward(self, x, mask, path="full"):
+        """ path can be "full", "induction" or "bigram" """
         X0 = self.embed(x)
 
         if path in ["induction", "full"]:
@@ -106,19 +107,38 @@ class DualModel(nn.Module):
             out['X3'] = X3
         out['logits'] = self.unembed(X3)
         return out
+    
    
-def initialize_model(model):
+def initialize_model(model,path="full"):
     """ 
     Initialize model as ~ N(0, 1/sqrt(d_model)) and freeze: 
     [ embedding, positional embedding, unembedding, VO projection of first attention]
     """
+
+    # Initialize and freeze them all at first
     for param in model.parameters():
         param.data.copy_(torch.randn_like(param) / math.sqrt(model.d_model))
-    
-    model.embed.E.weight.requires_grad = False
-    model.embed.P.weight.requires_grad = False
-    model.unembed.U.weight.requires_grad = False
-    model.attn1.WOV.weight.requires_grad = False
+        param.requires_grad = False
+
+    # Unfreeze depending on the path
+    if path == "full":
+        model.attn1.WQK.weight.requires_grad = True
+        model.attn2.WQK.weight.requires_grad = True
+        model.attn2.WOV.weight.requires_grad = True
+        model.ff.WF.weight.requires_grad = True
+    elif path == "induction":
+        model.attn1.WQK.weight.requires_grad = True
+        model.attn2.WQK.weight.requires_grad = True
+        model.attn2.WOV.weight.requires_grad = True
+    elif path == "bigram":
+        model.ff.WF.weight.requires_grad = True
+    elif path == "full_trigg":
+        model.attn1.WQK.weight.requires_grad = True
+        model.attn2.WQK.weight.requires_grad = True
+        model.attn2.WOV.weight.requires_grad = True
+        model.ff.WF.weight.requires_grad = True
+    else:
+        raise ValueError("Invalid path. Options are 'full', 'induction', and 'bigram'.")
     
     return model
 
